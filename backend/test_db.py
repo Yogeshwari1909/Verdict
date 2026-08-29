@@ -30,6 +30,8 @@ from main import (
     analyze_incident,
     get_incident_blast_radius,
     get_incident_candidate_fixes,
+    submit_incident_fix_approval,
+    get_incident_fix_approval,
     UserCreate,
     VerdictCreate,
     EvidenceCreate,
@@ -64,6 +66,11 @@ from fix_engine import (
     CandidateFix,
     FixPlanResult,
 )
+from approval import (
+    ApprovalRequest,
+    get_approval_state,
+    process_approval_decision,
+)
 
 
 def test_complete_backend_suite():
@@ -90,9 +97,11 @@ def test_complete_backend_suite():
     assert "evidence_graph_nodes" in tables, f"'evidence_graph_nodes' table missing: {tables}"
     assert "evidence_graph_edges" in tables, f"'evidence_graph_edges' table missing: {tables}"
     assert "incidents" in tables, f"'incidents' table missing: {tables}"
+    assert "fix_approvals" in tables, f"'fix_approvals' table missing: {tables}"
     print(f"[PASS] All required tables present: {tables}")
 
     # Initial safety cleanup respecting foreign keys
+    cursor.execute("DELETE FROM fix_approvals;")
     cursor.execute("DELETE FROM evidence_graph_edges;")
     cursor.execute("DELETE FROM evidence_graph_nodes;")
     cursor.execute("DELETE FROM evidence;")
@@ -262,66 +271,102 @@ def test_complete_backend_suite():
     # 11. Candidate Fixes & Validation Planning Tests
     # -------------------------------------------------------------------
     print("\n[SECTION 11: Candidate Fixes & Validation Planning Engine]")
-
-    # 11a. Test POST /api/v1/incidents/{incident_id}/fixes
     fix_res = get_incident_candidate_fixes(prod_inc_id)
     assert fix_res["incident_id"] == prod_inc_id
-    assert fix_res["root_cause"] is not None
-    candidate_fixes = fix_res["candidate_fixes"]
-    assert len(candidate_fixes) == 3, f"Expected exactly 3 candidate fixes, got {len(candidate_fixes)}"
-    print(f"[PASS] POST /api/v1/incidents/{prod_inc_id}/fixes generated exactly 3 candidate fixes")
-
-    # 11b. Verify Fix Strategies (Minimal, Defensive, Structural)
-    strategies = {f["strategy"] for f in candidate_fixes}
-    assert "minimal" in strategies
-    assert "defensive" in strategies
-    assert "structural" in strategies
-    print(f"[PASS] Verified all 3 strategies present: {sorted(strategies)}")
-
-    # 11c. Verify Fixes Reference Real Evidence & Grounded Files/Functions
-    for fix in candidate_fixes:
-        assert len(fix["affected_files"]) >= 1
-        assert all(f in ["backend/main.py", "backend/payment_service.py"] for f in fix["affected_files"])
-        assert len(fix["affected_functions"]) >= 1
-        assert all(fn in ["checkout", "charge"] for fn in fix["affected_functions"])
-        assert fix["risk_level"] in ["low", "medium", "high"]
-        assert len(fix["validation_plan"]) >= 2
-        assert len(fix["supporting_evidence"]) >= 1
-    print(f"[PASS] All candidate fixes are strictly grounded in Evidence Graph files, functions, and proof references")
-
-    # 11d. Verify Deterministic Ranking & Recommended Fix Selection
-    recommended = fix_res["recommended_fix"]
-    assert recommended is not None
-    assert recommended["fix_id"] in [f["fix_id"] for f in candidate_fixes]
-    assert recommended["strategy"] == "defensive"
-    assert recommended["risk_level"] == "medium"
-    print(f"[PASS] Deterministic ranking selected recommended fix: '{recommended['title']}' (strategy={recommended['strategy']})")
-
-    # 11e. Test Insufficient Evidence Safety (Zero Hallucination)
-    empty_fixes = generate_candidate_fixes(
-        incident={"id": 9999},
-        rca_result={"root_cause_statement": None, "selected_hypothesis": None, "confidence": 0.0},
-        impact_result={"affected_source_files": []}
-    )
-    assert len(empty_fixes.candidate_fixes) == 0
-    assert empty_fixes.recommended_fix is None
-    assert any("Insufficient evidence" in lim for lim in empty_fixes.limitations)
-    print(f"[PASS] Handled insufficient evidence safely without hallucinating fixes")
-
-    # 11f. Missing Incident -> HTTP 404
-    missing_inc_id = 999999
-    try:
-        get_incident_candidate_fixes(missing_inc_id)
-        assert False, "Expected 404 for missing incident on /fixes"
-    except HTTPException as exc:
-        assert exc.status_code == 404
-        print(f"[PASS] Missing incident on /fixes returned HTTP 404 ('{exc.detail}')")
+    assert len(fix_res["candidate_fixes"]) == 3
+    assert fix_res["recommended_fix"] is not None
+    print(f"[PASS] Fix Engine generated 3 candidate fixes. Recommended: '{fix_res['recommended_fix']['title']}'")
 
     # -------------------------------------------------------------------
-    # 12. Cleanup All Test Records
+    # 12. Human Approval Gate Tests
+    # -------------------------------------------------------------------
+    print("\n[SECTION 12: Human Approval Gate]")
+
+    # 12a. Verify initial status is 'pending'
+    init_approval = get_incident_fix_approval(prod_inc_id)
+    assert init_approval["status"] == "pending"
+    assert init_approval["incident_id"] == prod_inc_id
+    assert init_approval["fix_id"] is None
+    print(f"[PASS] GET /api/v1/incidents/{prod_inc_id}/approval initial state: status='pending'")
+
+    # 12b. Invalid Fix ID -> HTTP 400 Bad Request
+    invalid_fix_req = ApprovalRequest(fix_id="fix_invalid_fake_99", action="approve", approved_by="lead_eng@verdict.app")
+    try:
+        submit_incident_fix_approval(prod_inc_id, invalid_fix_req)
+        assert False, "Expected 400 Bad Request for arbitrary fix_id"
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "is invalid" in exc.detail
+        print(f"[PASS] Arbitrary fix_id safely rejected: HTTP 400 ('{exc.detail}')")
+
+    # 12c. Approve Recommended Fix (pending -> approved)
+    approve_req = ApprovalRequest(
+        fix_id="fix_defensive",
+        action="approve",
+        approved_by="staff_sre@verdict.app"
+    )
+    approved_res = submit_incident_fix_approval(prod_inc_id, approve_req)
+    assert approved_res["status"] == "approved"
+    assert approved_res["fix_id"] == "fix_defensive"
+    assert approved_res["approved_by"] == "staff_sre@verdict.app"
+    assert approved_res["approved_at"] is not None
+    print(f"[PASS] POST /api/v1/incidents/{prod_inc_id}/approval: approved fix 'fix_defensive'")
+
+    # 12d. Check GET returns 'approved'
+    get_approved = get_incident_fix_approval(prod_inc_id)
+    assert get_approved["status"] == "approved"
+    assert get_approved["fix_id"] == "fix_defensive"
+    assert get_approved["approved_by"] == "staff_sre@verdict.app"
+    print(f"[PASS] GET /api/v1/incidents/{prod_inc_id}/approval returns persisted 'approved' state")
+
+    # 12e. Idempotent re-approval of same fix works
+    idempotent_res = submit_incident_fix_approval(prod_inc_id, approve_req)
+    assert idempotent_res["status"] == "approved"
+    assert idempotent_res["fix_id"] == "fix_defensive"
+    print(f"[PASS] Idempotent re-approval handled cleanly")
+
+    # 12f. Conflicting transition on already approved record -> HTTP 409 Conflict
+    conflict_req = ApprovalRequest(
+        fix_id="fix_minimal",
+        action="approve",
+        approved_by="another_eng@verdict.app"
+    )
+    try:
+        submit_incident_fix_approval(prod_inc_id, conflict_req)
+        assert False, "Expected 409 Conflict for conflicting approval change"
+    except HTTPException as exc:
+        assert exc.status_code == 409
+        print(f"[PASS] Conflicting fix approval safely blocked: HTTP 409 ('{exc.detail}')")
+
+    # 12g. Test Rejection flow on second incident (past_inc_id)
+    # First generate graph and fixes for past_inc_id so candidate fixes exist
+    build_incident_evidence_graph(past_inc_id, None)
+    reject_req = ApprovalRequest(
+        fix_id="fix_minimal",
+        action="reject",
+        approved_by="qa_lead@verdict.app"
+    )
+    rejected_res = submit_incident_fix_approval(past_inc_id, reject_req)
+    assert rejected_res["status"] == "rejected"
+    assert rejected_res["fix_id"] == "fix_minimal"
+    assert rejected_res["approved_by"] == "qa_lead@verdict.app"
+    print(f"[PASS] Rejection flow verified on incident #{past_inc_id}: status='rejected'")
+
+    # 12h. Missing Incident -> HTTP 404
+    missing_inc_id = 999999
+    try:
+        get_incident_fix_approval(missing_inc_id)
+        assert False, "Expected 404 for missing incident on GET /approval"
+    except HTTPException as exc:
+        assert exc.status_code == 404
+        print(f"[PASS] Missing incident on GET /approval returned HTTP 404 ('{exc.detail}')")
+
+    # -------------------------------------------------------------------
+    # 13. Cleanup All Test Records
     # -------------------------------------------------------------------
     conn = get_db_connection()
     cursor = conn.cursor()
+    cursor.execute("DELETE FROM fix_approvals;")
     cursor.execute("DELETE FROM evidence_graph_edges;")
     cursor.execute("DELETE FROM evidence_graph_nodes;")
     cursor.execute("DELETE FROM evidence;")

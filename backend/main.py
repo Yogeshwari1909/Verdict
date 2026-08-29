@@ -16,6 +16,7 @@ from evidence_graph import build_incident_graph
 from rca_engine import analyze_incident_rca
 from impact_analysis import analyze_blast_radius
 from fix_engine import generate_candidate_fixes
+from approval import ApprovalRequest, get_approval_state, process_approval_decision
 
 # Simple regex for email format validation
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
@@ -1121,6 +1122,86 @@ def get_incident_candidate_fixes(incident_id: int):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to generate candidate fixes: {str(exc)}"
         )
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/incidents/{incident_id}/approval", status_code=status.HTTP_200_OK)
+def submit_incident_fix_approval(incident_id: int, payload: ApprovalRequest):
+    """
+    Submits a human approval or rejection decision for a candidate fix.
+    Validates fix_id against the incident's candidate fixes and enforces safe state machine rules.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # 1. Verify incident exists
+    cursor.execute("SELECT * FROM incidents WHERE id = ?;", (incident_id,))
+    incident_row = cursor.fetchone()
+    if incident_row is None:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident with ID {incident_id} not found"
+        )
+
+    incident = dict(incident_row)
+    if incident.get("metadata"):
+        try:
+            incident["metadata"] = json.loads(incident["metadata"])
+        except Exception:
+            pass
+
+    try:
+        # Obtain candidate fixes for this incident to validate fix_id
+        verdict_title = f"Incident #{incident_id}: {incident.get('exception_type')} on {incident.get('endpoint')}"
+        cursor.execute("SELECT id FROM verdicts WHERE title = ?;", (verdict_title,))
+        v_row = cursor.fetchone()
+        verdict_id = v_row["id"] if v_row else None
+
+        collected_evidence = collect_evidence(incident, verdict_id=verdict_id, conn=conn)
+        graph_result = build_incident_graph(incident, collected_evidence=collected_evidence, verdict_id=verdict_id, conn=conn)
+        graph = graph_result.get("graph", {"nodes": [], "edges": []})
+
+        rca_result = analyze_incident_rca(incident, graph=graph, collected_evidence=collected_evidence)
+        impact_result = analyze_blast_radius(incident, graph=graph)
+        fix_plan = generate_candidate_fixes(incident, rca_result=rca_result.to_dict(), impact_result=impact_result.to_dict())
+
+        valid_fix_ids = [f.fix_id for f in fix_plan.candidate_fixes]
+
+        # Process approval decision
+        decision = process_approval_decision(
+            incident_id=incident_id,
+            payload=payload,
+            valid_fix_ids=valid_fix_ids,
+            conn=conn
+        )
+        return decision
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/incidents/{incident_id}/approval", status_code=status.HTTP_200_OK)
+def get_incident_fix_approval(incident_id: int):
+    """
+    Retrieves the current approval state for an incident.
+    Returns status='pending' if no decision has been submitted.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # 1. Verify incident exists
+    cursor.execute("SELECT id FROM incidents WHERE id = ?;", (incident_id,))
+    if cursor.fetchone() is None:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident with ID {incident_id} not found"
+        )
+
+    try:
+        state = get_approval_state(incident_id, conn=conn)
+        return state
     finally:
         conn.close()
 
