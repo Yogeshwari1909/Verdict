@@ -64,7 +64,7 @@ def init_db() -> None:
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS evidence_graph_nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        verdict_id INTEGER NOT NULL,
+        verdict_id INTEGER,
         node_type TEXT NOT NULL,
         label TEXT NOT NULL,
         data TEXT,
@@ -77,7 +77,7 @@ def init_db() -> None:
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS evidence_graph_edges (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        verdict_id INTEGER NOT NULL,
+        verdict_id INTEGER,
         source_node_id INTEGER NOT NULL,
         target_node_id INTEGER NOT NULL,
         relationship TEXT NOT NULL,

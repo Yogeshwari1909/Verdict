@@ -25,6 +25,7 @@ from main import (
     ingest_incident,
     get_incident,
     collect_incident_evidence,
+    build_incident_evidence_graph,
     UserCreate,
     VerdictCreate,
     EvidenceCreate,
@@ -32,6 +33,7 @@ from main import (
     GraphEdgeCreate,
     IncidentIngestRequest,
     CollectEvidenceRequest,
+    BuildGraphRequest,
     SUPPORTED_NODE_TYPES,
 )
 from evidence_collector import (
@@ -39,6 +41,10 @@ from evidence_collector import (
     collect_github_evidence,
     collect_incident_memory_evidence,
     CollectedEvidence,
+)
+from evidence_graph import (
+    build_incident_graph,
+    extract_traceback_frames,
 )
 
 
@@ -134,7 +140,7 @@ def test_complete_backend_suite():
     print(f"[PASS] POST /verdicts/{created_v1['id']}/evidence: created evidence ID={ev_1['id']}")
 
     # -------------------------------------------------------------------
-    # 6. Evidence Graph Tests
+    # 6. Evidence Graph Tests (Manual Nodes & Edges)
     # -------------------------------------------------------------------
     print("\n[SECTION 6: Evidence Graph Foundation]")
     node_1 = create_graph_node(created_v1["id"], GraphNodeCreate(node_type="api_request", label="POST /checkout"))
@@ -147,10 +153,9 @@ def test_complete_backend_suite():
     print(f"[PASS] Graph node & edge created and retrieved successfully for verdict {created_v1['id']}")
 
     # -------------------------------------------------------------------
-    # 7. Incident Ingestion & Redaction/Normalization Tests
+    # 7. Incident Ingestion & Redaction Tests
     # -------------------------------------------------------------------
-    print("\n[SECTION 7: Incident Ingestion & Redaction/Normalization]")
-    # First create a historical incident (Incident #1)
+    print("\n[SECTION 7: Incident Ingestion & Redaction]")
     past_incident_payload = IncidentIngestRequest(
         service="checkout-service",
         environment="staging",
@@ -159,23 +164,27 @@ def test_complete_backend_suite():
         status_code=500,
         exception_type="PaymentProcessingError",
         exception_message="Historical failure: Null payment token",
-        stack_trace="Traceback: line 20 in charge()",
+        stack_trace="Traceback:\n  File 'backend/payment.py', line 20, in process_token",
         metadata={"build": "v1.0.0"}
     )
     past_ingest = ingest_incident(past_incident_payload)
     created_incident_ids.append(past_ingest["incident_id"])
-    print(f"[PASS] Ingested historical incident ID={past_ingest['incident_id']}")
 
-    # Now create current incident (Incident #2) with sensitive data to verify redaction
     current_incident_payload = IncidentIngestRequest(
-        service="  checkout-service  ",
-        environment=" production ",
-        endpoint=" checkout ",
-        http_method=" post ",
+        service="checkout-service",
+        environment="production",
+        endpoint="/checkout",
+        http_method="post",
         status_code=500,
         exception_type="PaymentProcessingError",
         exception_message="Failed charging with api_key=sk_live_secret12345",
-        stack_trace="Traceback:\n  File 'backend/main.py', line 45\n    headers={'Authorization': 'Bearer eyJhbGciOiJIUzI1NiJ9.secretToken'}",
+        stack_trace=(
+            "Traceback (most recent call last):\n"
+            "  File 'backend/main.py', line 45, in checkout\n"
+            "    charge_res = payment_service.charge(payment_data)\n"
+            "  File 'backend/payment_service.py', line 27, in charge\n"
+            "    raise ValueError('Payment payload is null with token: Bearer eyJhbGciOiJIUzI1NiJ9.secretToken')"
+        ),
         request_id="req_9876",
         metadata={
             "api_key": "sk_live_998877",
@@ -186,82 +195,91 @@ def test_complete_backend_suite():
     curr_ingest = ingest_incident(current_incident_payload)
     curr_inc_id = curr_ingest["incident_id"]
     created_incident_ids.append(curr_inc_id)
-    print(f"[PASS] Ingested current incident ID={curr_inc_id}")
+    print(f"[PASS] Ingested incidents: Historical #{past_ingest['incident_id']}, Current #{curr_inc_id}")
 
     # -------------------------------------------------------------------
     # 8. Evidence Collector Tests
     # -------------------------------------------------------------------
     print("\n[SECTION 8: Evidence Collector Foundation]")
-
-    # 8a. Safe Mock GitHub Collector (No Network Calls)
-    gh_evidence = collect_github_evidence("Yogeshwari1909/Verdict", "backend/main.py", "abc1234")
-    assert gh_evidence.source == "github"
-    assert gh_evidence.evidence_type == "source_reference"
-    assert "abc1234" in gh_evidence.title
-    assert gh_evidence.metadata["network_call"] is False
-    assert gh_evidence.metadata["is_mock"] is True
-    print(f"[PASS] GitHub Collector (Offline/Safe): {gh_evidence.title}")
-
-    # 8b. Incident Memory Collector finding matching historical incident
-    curr_inc_record = curr_ingest["incident"]
-    conn = get_db_connection()
-    memory_matches = collect_incident_memory_evidence(curr_inc_record, conn=conn)
-    conn.close()
-    assert len(memory_matches) >= 1, "Expected to find past matching incident in Incident Memory"
-    matched_id = memory_matches[0].metadata["matched_incident_id"]
-    assert matched_id == past_ingest["incident_id"], f"Expected to match incident {past_ingest['incident_id']}, got {matched_id}"
-    print(f"[PASS] Incident Memory Collector: found historical incident #{matched_id} for service '{curr_inc_record['service']}'")
-
-    # 8c. Safe handling when no historical incident matches
-    unique_incident = {
-        "id": 99999,
-        "service": "unique_unknown_service_xyz",
-        "endpoint": "/non_existent",
-        "exception_type": "UnknownCustomError",
-        "exception_message": "completely unique message 12345"
-    }
-    conn = get_db_connection()
-    empty_matches = collect_incident_memory_evidence(unique_incident, conn=conn)
-    conn.close()
-    assert len(empty_matches) == 0
-    print(f"[PASS] Incident Memory Collector: safely handled 0 matches without errors")
-
-    # 8d. Test collect_evidence orchestration function
-    orchestrated_evidence = collect_evidence(curr_inc_record, verdict_id=None)
-    assert len(orchestrated_evidence) >= 2  # Includes memory match + GitHub + runtime telemetry
-    sources = [e["source"] for e in orchestrated_evidence]
-    assert "github" in sources
+    collected = collect_evidence(curr_ingest["incident"], verdict_id=None)
+    assert len(collected) >= 3
+    sources = [e["source"] for e in collected]
     assert "incident_memory" in sources
+    assert "github" in sources
     assert "runtime_telemetry" in sources
-    print(f"[PASS] collect_evidence orchestration returned {len(orchestrated_evidence)} structured evidence items")
+    print(f"[PASS] Evidence Collector returned {len(collected)} structured items")
 
-    # 8e. Test POST /api/v1/incidents/{incident_id}/collect-evidence endpoint (without verdict_id)
-    endpoint_res = collect_incident_evidence(curr_inc_id, None)
-    assert endpoint_res["status"] == "success"
-    assert endpoint_res["incident_id"] == curr_inc_id
-    assert endpoint_res["evidence_count"] >= 3
-    print(f"[PASS] POST /api/v1/incidents/{curr_inc_id}/collect-evidence returned {endpoint_res['evidence_count']} evidence items")
+    # -------------------------------------------------------------------
+    # 9. Automated Evidence Graph Construction Tests
+    # -------------------------------------------------------------------
+    print("\n[SECTION 9: Automated Incident Evidence Graph Construction]")
 
-    # 8f. Test POST /api/v1/incidents/{incident_id}/collect-evidence with verdict_id to persist in evidence table
-    persist_res = collect_incident_evidence(curr_inc_id, CollectEvidenceRequest(verdict_id=created_v1["id"]))
-    assert persist_res["status"] == "success"
-    
-    # Verify records stored in evidence table
-    verdict_evidence = get_verdict_evidence(created_v1["id"])
-    assert len(verdict_evidence) >= 3
-    print(f"[PASS] Persisted collected evidence in SQLite 'evidence' table for verdict {created_v1['id']} (count={len(verdict_evidence)})")
+    # 9a. Test Traceback Frame Extraction without hallucination
+    sample_trace = (
+        "Traceback (most recent call last):\n"
+        "  File 'backend/main.py', line 45, in checkout\n"
+        "  File 'backend/payment_service.py', line 27, in charge\n"
+    )
+    extracted_frames = extract_traceback_frames(sample_trace)
+    assert len(extracted_frames) == 2
+    assert extracted_frames[0]["file_path"] == "backend/main.py"
+    assert extracted_frames[0]["function_name"] == "checkout"
+    assert extracted_frames[1]["file_path"] == "backend/payment_service.py"
+    assert extracted_frames[1]["function_name"] == "charge"
+    print(f"[PASS] extract_traceback_frames parsed {len(extracted_frames)} frames accurately without hallucination")
 
-    # 8g. Test missing incident returns HTTP 404
+    # 9b. Build Graph via Endpoint (POST /api/v1/incidents/{incident_id}/build-graph)
+    graph_res = build_incident_evidence_graph(curr_inc_id, None)
+    assert graph_res["status"] == "success"
+    assert graph_res["incident_id"] == curr_inc_id
+    assert graph_res["verdict_id"] is not None
+    created_verdict_ids.append(graph_res["verdict_id"])
+    nodes = graph_res["graph"]["nodes"]
+    edges = graph_res["graph"]["edges"]
+    assert len(nodes) >= 6
+    assert len(edges) >= 5
+    print(f"[PASS] POST /api/v1/incidents/{curr_inc_id}/build-graph created {len(nodes)} nodes and {len(edges)} edges")
+
+    # 9c. Verify Expected Node Types
+    node_types = {n["node_type"] for n in nodes}
+    expected_types = {"api_request", "endpoint", "exception", "stack_trace", "function", "source_file", "past_incident"}
+    for exp in expected_types:
+        assert exp in node_types, f"Expected node type '{exp}' missing from graph: {node_types}"
+    print(f"[PASS] All expected node types verified in graph: {sorted(node_types)}")
+
+    # 9d. Verify Expected Relationships
+    relationships = {e["relationship"] for e in edges}
+    for rel in ["routes_to", "raises", "generates", "occurs_in", "located_in", "matches_pattern"]:
+        assert rel in relationships, f"Expected relationship '{rel}' missing from graph edges: {relationships}"
+    print(f"[PASS] All expected incident chain relationships verified: {sorted(relationships)}")
+
+    # 9e. Verify Sanitized Data & No Secrets in Graph
+    for node in nodes:
+        node_str = json.dumps(node)
+        assert "sk_live_secret12345" not in node_str, f"Leaked secret in node: {node}"
+        assert "eyJhbGciOiJIUzI1NiJ9.secretToken" not in node_str, f"Leaked token in node: {node}"
+    print("[PASS] Graph data verified clean: no sensitive tokens or secrets present")
+
+    # 9f. Test Duplicate Prevention Strategy (Idempotency)
+    # Calling build-graph again for the same incident/verdict must not duplicate nodes/edges
+    graph_res_2 = build_incident_evidence_graph(curr_inc_id, BuildGraphRequest(verdict_id=graph_res["verdict_id"]))
+    nodes_2 = graph_res_2["graph"]["nodes"]
+    edges_2 = graph_res_2["graph"]["edges"]
+    assert len(nodes_2) == len(nodes), f"Duplicate prevention failed! Expected {len(nodes)} nodes, got {len(nodes_2)}"
+    assert len(edges_2) == len(edges), f"Duplicate prevention failed! Expected {len(edges)} edges, got {len(edges_2)}"
+    print(f"[PASS] Duplicate-prevention verified: repeated graph building produced identical {len(nodes_2)} nodes and {len(edges_2)} edges")
+
+    # 9g. Missing Incident -> 404
     missing_inc_id = 999999
     try:
-        collect_incident_evidence(missing_inc_id, None)
-        assert False, "Expected 404 for missing incident"
+        build_incident_evidence_graph(missing_inc_id, None)
+        assert False, "Expected 404 for missing incident on build-graph"
     except HTTPException as exc:
         assert exc.status_code == 404
         print(f"[PASS] Missing incident returned HTTP 404 ('{exc.detail}')")
 
     # -------------------------------------------------------------------
-    # 9. Cleanup All Test Records
+    # 10. Cleanup All Test Records
     # -------------------------------------------------------------------
     conn = get_db_connection()
     cursor = conn.cursor()

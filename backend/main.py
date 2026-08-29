@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 from database import init_db, get_db_connection
 from ingestion import normalize_and_redact_incident
 from evidence_collector import collect_evidence
+from evidence_graph import build_incident_graph
 
 # Simple regex for email format validation
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
@@ -199,6 +200,10 @@ class IncidentIngestRequest(BaseModel):
 
 class CollectEvidenceRequest(BaseModel):
     verdict_id: Optional[int] = Field(None, description="Optional verdict ID to link and persist collected evidence")
+
+
+class BuildGraphRequest(BaseModel):
+    verdict_id: Optional[int] = Field(None, description="Optional verdict ID to link and store the evidence graph")
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +823,80 @@ def collect_incident_evidence(incident_id: int, payload: Optional[CollectEvidenc
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to collect evidence: {str(exc)}"
+        )
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/incidents/{incident_id}/build-graph", status_code=status.HTTP_200_OK)
+def build_incident_evidence_graph(incident_id: int, payload: Optional[BuildGraphRequest] = None):
+    """
+    Builds the Evidence Graph for an ingested incident connecting:
+    API Request -> Endpoint -> Exception -> Stack Trace -> Function -> Source File
+    as well as collected evidence (historical incidents, local GitHub context).
+    Persists nodes and edges in SQLite with complete duplicate prevention.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # 1. Verify incident exists
+    cursor.execute("SELECT * FROM incidents WHERE id = ?;", (incident_id,))
+    incident_row = cursor.fetchone()
+    if incident_row is None:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident with ID {incident_id} not found"
+        )
+
+    incident = dict(incident_row)
+    if incident.get("metadata"):
+        try:
+            incident["metadata"] = json.loads(incident["metadata"])
+        except Exception:
+            pass
+
+    verdict_id = payload.verdict_id if payload else None
+
+    # 2. If no verdict_id provided, find or create one for this incident
+    if verdict_id is None:
+        verdict_title = f"Incident #{incident_id}: {incident.get('exception_type')} on {incident.get('endpoint')}"
+        cursor.execute("SELECT id FROM verdicts WHERE title = ?;", (verdict_title,))
+        existing_v = cursor.fetchone()
+        if existing_v:
+            verdict_id = existing_v["id"]
+        else:
+            cursor.execute(
+                "INSERT INTO verdicts (title, status) VALUES (?, ?);",
+                (verdict_title, "investigating")
+            )
+            conn.commit()
+            verdict_id = cursor.lastrowid
+    else:
+        cursor.execute("SELECT id FROM verdicts WHERE id = ?;", (verdict_id,))
+        if cursor.fetchone() is None:
+            conn.close()
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Verdict with ID {verdict_id} not found"
+            )
+
+    try:
+        # Collect evidence
+        collected_evidence = collect_evidence(incident, verdict_id=verdict_id, conn=conn)
+
+        # Build graph with safe duplicate prevention
+        graph_result = build_incident_graph(
+            incident=incident,
+            collected_evidence=collected_evidence,
+            verdict_id=verdict_id,
+            conn=conn
+        )
+        return graph_result
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to build evidence graph: {str(exc)}"
         )
     finally:
         conn.close()
