@@ -1,11 +1,17 @@
+import re
+import sqlite3
 import traceback
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
-from fastapi import FastAPI, Request, status
+from typing import Any, Dict, List, Optional
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator
 
 from database import init_db, get_db_connection
+
+# Simple regex for email format validation
+EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
 
 
 @asynccontextmanager
@@ -27,7 +33,87 @@ app.add_middleware(
 )
 
 
-# Mock payment service to simulate payment processing and failure traces
+# ---------------------------------------------------------------------------
+# Pydantic Schemas
+# ---------------------------------------------------------------------------
+
+class UserCreate(BaseModel):
+    name: str = Field(..., min_length=1, description="Required non-empty user name")
+    email: str = Field(..., min_length=1, description="Required valid email address")
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        v_stripped = v.strip()
+        if not v_stripped:
+            raise ValueError("Name cannot be empty or whitespace only")
+        return v_stripped
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        v_stripped = v.strip()
+        if not EMAIL_REGEX.match(v_stripped):
+            raise ValueError(f"'{v}' is not a valid email address")
+        return v_stripped.lower()
+
+
+class VerdictCreate(BaseModel):
+    user_id: Optional[int] = Field(None, description="Optional user ID associated with this verdict")
+    title: str = Field(..., min_length=1, description="Required title for the verdict")
+    status: str = Field(..., min_length=1, description="Required status (e.g. 'open', 'investigating', 'resolved')")
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v: str) -> str:
+        v_stripped = v.strip()
+        if not v_stripped:
+            raise ValueError("Title cannot be empty or whitespace only")
+        return v_stripped
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        v_stripped = v.strip()
+        if not v_stripped:
+            raise ValueError("Status cannot be empty or whitespace only")
+        return v_stripped
+
+
+class EvidenceCreate(BaseModel):
+    source: str = Field(..., min_length=1, description="Source of evidence (e.g. 'github_pr', 'log', 'sentry')")
+    evidence_type: str = Field(..., min_length=1, description="Type of evidence (e.g. 'traceback', 'diff', 'metrics')")
+    content: str = Field(..., min_length=1, description="The content of the evidence")
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, v: str) -> str:
+        v_stripped = v.strip()
+        if not v_stripped:
+            raise ValueError("Source cannot be empty or whitespace only")
+        return v_stripped
+
+    @field_validator("evidence_type")
+    @classmethod
+    def validate_evidence_type(cls, v: str) -> str:
+        v_stripped = v.strip()
+        if not v_stripped:
+            raise ValueError("Evidence type cannot be empty or whitespace only")
+        return v_stripped
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, v: str) -> str:
+        v_stripped = v.strip()
+        if not v_stripped:
+            raise ValueError("Content cannot be empty or whitespace only")
+        return v_stripped
+
+
+# ---------------------------------------------------------------------------
+# Mock Payment Service
+# ---------------------------------------------------------------------------
+
 class PaymentService:
     def charge(self, payment_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
@@ -53,6 +139,10 @@ class PaymentService:
 
 payment_service = PaymentService()
 
+
+# ---------------------------------------------------------------------------
+# Health & Status Endpoints
+# ---------------------------------------------------------------------------
 
 @app.get("/health")
 def health_check():
@@ -84,6 +174,236 @@ def db_status():
             }
         )
 
+
+# ---------------------------------------------------------------------------
+# Users Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/users", status_code=status.HTTP_201_CREATED)
+def create_user(payload: UserCreate):
+    """
+    Create a new user in SQLite.
+    Returns HTTP 201 with created user data.
+    Returns HTTP 409 if the email already exists.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO users (name, email) VALUES (?, ?);",
+            (payload.name, payload.email)
+        )
+        conn.commit()
+        new_id = cursor.lastrowid
+        cursor.execute(
+            "SELECT id, name, email, created_at FROM users WHERE id = ?;",
+            (new_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row)
+    except sqlite3.IntegrityError as exc:
+        conn.rollback()
+        error_msg = str(exc)
+        if "UNIQUE constraint failed: users.email" in error_msg or "UNIQUE" in error_msg:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"User with email '{payload.email}' already exists"
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Database integrity error: {error_msg}"
+        )
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create user: {str(exc)}"
+        )
+    finally:
+        conn.close()
+
+
+@app.get("/users")
+def get_all_users():
+    """
+    Retrieve all users ordered by newest first.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name, email, created_at FROM users ORDER BY id DESC;")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+@app.get("/users/{user_id}")
+def get_user_by_id(user_id: int):
+    """
+    Retrieve a single user by ID.
+    Returns HTTP 404 if the user does not exist.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, name, email, created_at FROM users WHERE id = ?;",
+        (user_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found"
+        )
+    return dict(row)
+
+
+# ---------------------------------------------------------------------------
+# Verdicts CRUD Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/verdicts", status_code=status.HTTP_201_CREATED)
+def create_verdict(payload: VerdictCreate):
+    """
+    Create a new verdict record in SQLite using parameterized queries.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO verdicts (user_id, title, status) VALUES (?, ?, ?);",
+            (payload.user_id, payload.title, payload.status)
+        )
+        conn.commit()
+        new_id = cursor.lastrowid
+        cursor.execute(
+            "SELECT id, user_id, title, status, created_at FROM verdicts WHERE id = ?;",
+            (new_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row)
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create verdict: {str(exc)}"
+        )
+    finally:
+        conn.close()
+
+
+@app.get("/verdicts")
+def get_all_verdicts():
+    """
+    Retrieve all verdict records ordered by newest first.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, user_id, title, status, created_at FROM verdicts ORDER BY id DESC;")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+@app.get("/verdicts/{verdict_id}")
+def get_verdict_by_id(verdict_id: int):
+    """
+    Retrieve a single verdict record by ID using parameterized query.
+    Returns HTTP 404 if the record does not exist.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, user_id, title, status, created_at FROM verdicts WHERE id = ?;",
+        (verdict_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Verdict with id {verdict_id} not found"
+        )
+    return dict(row)
+
+
+# ---------------------------------------------------------------------------
+# Evidence Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/verdicts/{verdict_id}/evidence", status_code=status.HTTP_201_CREATED)
+def create_evidence(verdict_id: int, payload: EvidenceCreate):
+    """
+    Create an evidence record linked to a verdict.
+    Returns HTTP 404 if the verdict does not exist.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Verify that the verdict exists
+    cursor.execute("SELECT id FROM verdicts WHERE id = ?;", (verdict_id,))
+    if cursor.fetchone() is None:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Verdict with ID {verdict_id} not found"
+        )
+
+    try:
+        cursor.execute(
+            "INSERT INTO evidence (verdict_id, source, evidence_type, content) VALUES (?, ?, ?, ?);",
+            (verdict_id, payload.source, payload.evidence_type, payload.content)
+        )
+        conn.commit()
+        new_id = cursor.lastrowid
+        cursor.execute(
+            "SELECT id, verdict_id, source, evidence_type, content, created_at FROM evidence WHERE id = ?;",
+            (new_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row)
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create evidence: {str(exc)}"
+        )
+    finally:
+        conn.close()
+
+
+@app.get("/verdicts/{verdict_id}/evidence")
+def get_verdict_evidence(verdict_id: int):
+    """
+    Retrieve all evidence records for a given verdict.
+    Returns HTTP 404 if the verdict does not exist.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Verify that the verdict exists
+    cursor.execute("SELECT id FROM verdicts WHERE id = ?;", (verdict_id,))
+    if cursor.fetchone() is None:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Verdict with ID {verdict_id} not found"
+        )
+
+    cursor.execute(
+        "SELECT id, verdict_id, source, evidence_type, content, created_at FROM evidence WHERE verdict_id = ? ORDER BY id ASC;",
+        (verdict_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Deliberate Failure Checkout Endpoint (Regression / Demo)
+# ---------------------------------------------------------------------------
 
 @app.post("/checkout")
 async def checkout(request: Request):

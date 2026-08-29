@@ -18,8 +18,8 @@ def get_db_connection() -> sqlite3.Connection:
 
 def init_db() -> None:
     """
-    Initializes the SQLite database and creates the users and verdicts
-    tables if they do not already exist.
+    Initializes the SQLite database and creates the users, verdicts,
+    and evidence tables if they do not already exist.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -43,6 +43,19 @@ def init_db() -> None:
         status TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(user_id) REFERENCES users(id)
+    );
+    """)
+
+    # Create evidence table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS evidence (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        verdict_id INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        evidence_type TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(verdict_id) REFERENCES verdicts(id) ON DELETE CASCADE
     );
     """)
 

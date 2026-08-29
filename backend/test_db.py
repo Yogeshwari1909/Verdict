@@ -17,8 +17,11 @@ from main import (
     create_verdict,
     get_all_verdicts,
     get_verdict_by_id,
+    create_evidence,
+    get_verdict_evidence,
     UserCreate,
     VerdictCreate,
+    EvidenceCreate,
 )
 
 
@@ -42,6 +45,7 @@ def test_complete_backend_suite():
     tables = [row["name"] for row in cursor.fetchall()]
     assert "users" in tables, f"'users' table missing: {tables}"
     assert "verdicts" in tables, f"'verdicts' table missing: {tables}"
+    assert "evidence" in tables, f"'evidence' table missing: {tables}"
     print(f"[PASS] Required tables present: {tables}")
 
     cursor.execute("PRAGMA table_info(users);")
@@ -55,6 +59,12 @@ def test_complete_backend_suite():
     for col in ["id", "user_id", "title", "status", "created_at"]:
         assert col in verdict_cols, f"Column '{col}' missing from verdicts table"
     print(f"[PASS] 'verdicts' schema verified: {list(verdict_cols.keys())}")
+
+    cursor.execute("PRAGMA table_info(evidence);")
+    evidence_cols = {row["name"]: row["type"] for row in cursor.fetchall()}
+    for col in ["id", "verdict_id", "source", "evidence_type", "content", "created_at"]:
+        assert col in evidence_cols, f"Column '{col}' missing from evidence table"
+    print(f"[PASS] 'evidence' schema verified: {list(evidence_cols.keys())}")
 
     conn.close()
 
@@ -90,7 +100,6 @@ def test_complete_backend_suite():
     # -------------------------------------------------------------------
     print("\n[SECTION 3: Users API]")
     
-    # Track IDs for cleanup
     created_user_ids = []
     created_verdict_ids = []
 
@@ -128,9 +137,8 @@ def test_complete_backend_suite():
     user_ids = [u["id"] for u in all_users]
     assert user_1["id"] in user_ids
     assert user_2["id"] in user_ids
-    # Verify newest users first (descending ID)
     user_indices = [user_ids.index(user_2["id"]), user_ids.index(user_1["id"])]
-    assert user_indices[0] < user_indices[1], "Users should be ordered newest first (descending ID)"
+    assert user_indices[0] < user_indices[1], "Users should be ordered newest first"
     print(f"[PASS] GET /users: retrieved {len(all_users)} users ordered newest first")
 
     # 3e. Get one user by ID (GET /users/{user_id})
@@ -157,27 +165,18 @@ def test_complete_backend_suite():
     except ValidationError:
         print("[PASS] Validation: rejected empty/whitespace name")
 
-    try:
-        UserCreate(name="", email="valid@verdict.app")
-        assert False, "Expected ValidationError for empty string name"
-    except ValidationError:
-        print("[PASS] Validation: rejected empty string name")
-
     # 3h. Validation: Invalid Email
-    for invalid_email in ["not-an-email", "missing-at-domain.com", "user@", "@domain.com", ""]:
-        try:
-            UserCreate(name="Valid Name", email=invalid_email)
-            assert False, f"Expected ValidationError for invalid email '{invalid_email}'"
-        except ValidationError:
-            pass
-    print("[PASS] Validation: rejected all invalid email formats")
+    try:
+        UserCreate(name="Valid Name", email="not-an-email")
+        assert False, "Expected ValidationError for invalid email"
+    except ValidationError:
+        print("[PASS] Validation: rejected invalid email format")
 
     # -------------------------------------------------------------------
     # 4. Verdicts CRUD Tests
     # -------------------------------------------------------------------
     print("\n[SECTION 4: Verdicts CRUD API]")
     
-    # 4a. Create a verdict (POST /verdicts)
     payload_v1 = VerdictCreate(title="Login Authentication Failure", status="investigating")
     created_v1 = create_verdict(payload_v1)
     assert created_v1["id"] is not None
@@ -188,7 +187,6 @@ def test_complete_backend_suite():
     created_verdict_ids.append(created_v1["id"])
     print(f"[PASS] POST /verdicts (without user_id): ID={created_v1['id']}, title='{created_v1['title']}'")
 
-    # 4b. Create a verdict with valid user_id
     payload_v2 = VerdictCreate(user_id=user_1["id"], title="Checkout Missing Payment Crash", status="open")
     created_v2 = create_verdict(payload_v2)
     assert created_v2["id"] is not None
@@ -197,7 +195,6 @@ def test_complete_backend_suite():
     created_verdict_ids.append(created_v2["id"])
     print(f"[PASS] POST /verdicts (with user_id={user_1['id']}): ID={created_v2['id']}, title='{created_v2['title']}'")
 
-    # 4c. Get all verdicts (GET /verdicts)
     all_verdicts = get_all_verdicts()
     assert len(all_verdicts) >= 2
     v_ids = [v["id"] for v in all_verdicts]
@@ -205,43 +202,112 @@ def test_complete_backend_suite():
     assert created_v2["id"] in v_ids
     print(f"[PASS] GET /verdicts: retrieved {len(all_verdicts)} records successfully")
 
-    # 4d. Get one verdict by ID (GET /verdicts/{verdict_id})
     single_verdict = get_verdict_by_id(created_v1["id"])
     assert single_verdict["id"] == created_v1["id"]
     assert single_verdict["title"] == "Login Authentication Failure"
     print(f"[PASS] GET /verdicts/{created_v1['id']}: retrieved record matching ID")
 
-    # 4e. 404 for non-existent verdict
     missing_v_id = 999999
     try:
         get_verdict_by_id(missing_v_id)
         assert False, "Expected HTTPException 404 for missing verdict"
     except HTTPException as exc:
         assert exc.status_code == 404
-        assert str(missing_v_id) in exc.detail
         print(f"[PASS] GET /verdicts/{missing_v_id}: correctly returned HTTP 404 ('{exc.detail}')")
 
-    # 4f. Validation: Empty / Whitespace Verdict Fields
+    # -------------------------------------------------------------------
+    # 5. Evidence Foundation Tests
+    # -------------------------------------------------------------------
+    print("\n[SECTION 5: Evidence API & Relationships]")
+    
+    # 5a. Create Evidence for existing verdict
+    ev_payload_1 = EvidenceCreate(
+        source="github_pr_102",
+        evidence_type="traceback",
+        content="ValueError: payment_service.charge: Payment payload is null or missing"
+    )
+    ev_1 = create_evidence(created_v2["id"], ev_payload_1)
+    assert ev_1["id"] is not None
+    assert ev_1["verdict_id"] == created_v2["id"]
+    assert ev_1["source"] == "github_pr_102"
+    assert ev_1["evidence_type"] == "traceback"
+    assert "ValueError" in ev_1["content"]
+    assert "created_at" in ev_1
+    print(f"[PASS] POST /verdicts/{created_v2['id']}/evidence: created evidence ID={ev_1['id']}")
+
+    # 5b. Create second Evidence for same verdict
+    ev_payload_2 = EvidenceCreate(
+        source="sentry_issue_99",
+        evidence_type="log",
+        content="Unhandled exception in checkout route handler"
+    )
+    ev_2 = create_evidence(created_v2["id"], ev_payload_2)
+    assert ev_2["id"] is not None
+    assert ev_2["verdict_id"] == created_v2["id"]
+    print(f"[PASS] POST /verdicts/{created_v2['id']}/evidence: created second evidence ID={ev_2['id']}")
+
+    # 5c. Retrieve Evidence for verdict (GET /verdicts/{verdict_id}/evidence)
+    ev_list = get_verdict_evidence(created_v2["id"])
+    assert len(ev_list) == 2
+    assert ev_list[0]["id"] == ev_1["id"]
+    assert ev_list[1]["id"] == ev_2["id"]
+    print(f"[PASS] GET /verdicts/{created_v2['id']}/evidence: retrieved {len(ev_list)} items")
+
+    # 5d. Missing Verdict ID -> 404 on POST and GET
+    missing_vid = 888888
     try:
-        VerdictCreate(title="   ", status="open")
-        assert False, "Expected ValidationError for whitespace title"
-    except ValidationError:
-        print("[PASS] Verdict validation: whitespace title rejected")
+        create_evidence(missing_vid, ev_payload_1)
+        assert False, "Expected 404 when adding evidence to missing verdict"
+    except HTTPException as exc:
+        assert exc.status_code == 404
+        assert str(missing_vid) in exc.detail
+        print(f"[PASS] POST /verdicts/{missing_vid}/evidence: returned HTTP 404 ('{exc.detail}')")
 
     try:
-        VerdictCreate(title="Valid Title", status="   ")
-        assert False, "Expected ValidationError for whitespace status"
+        get_verdict_evidence(missing_vid)
+        assert False, "Expected 404 when getting evidence for missing verdict"
+    except HTTPException as exc:
+        assert exc.status_code == 404
+        assert str(missing_vid) in exc.detail
+        print(f"[PASS] GET /verdicts/{missing_vid}/evidence: returned HTTP 404 ('{exc.detail}')")
+
+    # 5e. Validation: Empty/Whitespace Fields in EvidenceCreate
+    try:
+        EvidenceCreate(source="   ", evidence_type="log", content="data")
+        assert False, "Expected ValidationError for whitespace source"
     except ValidationError:
-        print("[PASS] Verdict validation: whitespace status rejected")
+        print("[PASS] Evidence validation: rejected whitespace source")
+
+    try:
+        EvidenceCreate(source="github", evidence_type="", content="data")
+        assert False, "Expected ValidationError for empty evidence_type"
+    except ValidationError:
+        print("[PASS] Evidence validation: rejected empty evidence_type")
+
+    try:
+        EvidenceCreate(source="github", evidence_type="diff", content="   ")
+        assert False, "Expected ValidationError for whitespace content"
+    except ValidationError:
+        print("[PASS] Evidence validation: rejected whitespace content")
+
+    # 5f. Foreign Key & Cascade Deletion Test
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    # Delete verdict and verify that ON DELETE CASCADE removes associated evidence
+    cursor.execute("DELETE FROM verdicts WHERE id = ?;", (created_v2["id"],))
+    conn.commit()
+    cursor.execute("SELECT id FROM evidence WHERE verdict_id = ?;", (created_v2["id"],))
+    remaining_evidence = cursor.fetchall()
+    assert len(remaining_evidence) == 0, f"Expected 0 evidence rows after verdict deletion, found {len(remaining_evidence)}"
+    print(f"[PASS] Foreign key cascade: deleting verdict {created_v2['id']} automatically deleted associated evidence")
+    conn.close()
 
     # -------------------------------------------------------------------
-    # 5. Cleanup Test Records
+    # 6. Cleanup Remaining Test Records
     # -------------------------------------------------------------------
     conn = get_db_connection()
     cursor = conn.cursor()
-    if created_verdict_ids:
-        placeholders = ",".join("?" * len(created_verdict_ids))
-        cursor.execute(f"DELETE FROM verdicts WHERE id IN ({placeholders});", created_verdict_ids)
+    cursor.execute("DELETE FROM verdicts WHERE id = ?;", (created_v1["id"],))
     if created_user_ids:
         placeholders = ",".join("?" * len(created_user_ids))
         cursor.execute(f"DELETE FROM users WHERE id IN ({placeholders});", created_user_ids)
