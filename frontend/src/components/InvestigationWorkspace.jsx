@@ -1,10 +1,13 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../api/client";
 import EvidenceCollectorView from "./EvidenceCollectorView";
 import EvidenceGraphView from "./EvidenceGraphView";
 import RCAAnalysisView from "./RCAAnalysisView";
 import BlastRadiusView from "./BlastRadiusView";
 import CandidateFixesView from "./CandidateFixesView";
+import HumanApprovalView from "./HumanApprovalView";
+import RegressionSentinelView from "./RegressionSentinelView";
+import GitHubPRView from "./GitHubPRView";
 
 export default function InvestigationWorkspace({
   incidentId,
@@ -38,6 +41,22 @@ export default function InvestigationWorkspace({
   const [fixesData, setFixesData] = useState(null);
   const [generatingFixes, setGeneratingFixes] = useState(false);
   const [fixesError, setFixesError] = useState(null);
+
+  // Human Approval Gate State
+  const [approvalData, setApprovalData] = useState(null);
+  const [loadingApproval, setLoadingApproval] = useState(false);
+  const [submittingApproval, setSubmittingApproval] = useState(false);
+  const [approvalError, setApprovalError] = useState(null);
+
+  // Regression Sentinel State
+  const [sentinelData, setSentinelData] = useState(null);
+  const [runningSentinel, setRunningSentinel] = useState(false);
+  const [sentinelError, setSentinelError] = useState(null);
+
+  // GitHub PR State
+  const [prData, setPrData] = useState(null);
+  const [preparingPr, setPreparingPr] = useState(false);
+  const [prError, setPrError] = useState(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -174,6 +193,118 @@ export default function InvestigationWorkspace({
     }
   };
 
+  // Handler for fetching current Human Approval state from backend
+  const handleFetchApproval = useCallback(async () => {
+    if (!incidentId) return;
+    setLoadingApproval(true);
+    setApprovalError(null);
+    try {
+      const res = await api.getApproval(incidentId);
+      setApprovalData(res);
+    } catch (err) {
+      if (err.status === 404) {
+        setApprovalData({
+          approval_id: null,
+          incident_id: incidentId,
+          fix_id: null,
+          status: "pending",
+          approved_by: null,
+          approved_at: null,
+          created_at: null,
+        });
+      } else {
+        setApprovalError(
+          err.message || "Failed to load approval status from backend."
+        );
+      }
+    } finally {
+      setLoadingApproval(false);
+    }
+  }, [incidentId]);
+
+  useEffect(() => {
+    handleFetchApproval();
+  }, [handleFetchApproval]);
+
+  // Handler for submitting a human approval or rejection decision
+  const handleSubmitApproval = async ({ fix_id, action, approved_by }) => {
+    if (!incidentId || submittingApproval) return;
+    setSubmittingApproval(true);
+    setApprovalError(null);
+    try {
+      const res = await api.submitApproval(incidentId, {
+        fix_id,
+        action,
+        approved_by,
+      });
+      setApprovalData(res);
+    } catch (err) {
+      let errorMsg = err.message || "Failed to submit approval decision.";
+      if (err.status === 409) {
+        errorMsg = "This incident already has a conflicting approval decision recorded.";
+      } else if (err.status === 400) {
+        errorMsg = "Selected fix is not valid for this incident.";
+      } else if (err.status === 404) {
+        errorMsg = `Incident #${incidentId} not found.`;
+      }
+      setApprovalError(errorMsg);
+    } finally {
+      setSubmittingApproval(false);
+    }
+  };
+
+  // Handler for running the Regression Sentinel automated validation suite
+  const handleRunRegressionSentinel = async (fixId) => {
+    const targetFixId = fixId || approvalData?.fix_id;
+    if (!incidentId || !targetFixId || runningSentinel) return;
+    setRunningSentinel(true);
+    setSentinelError(null);
+    try {
+      const res = await api.runRegressionCheck(incidentId, {
+        fix_id: targetFixId,
+      });
+      setSentinelData(res);
+    } catch (err) {
+      let errorMsg = err.message || "Failed to execute Regression Sentinel checks.";
+      if (err.status === 412) {
+        errorMsg = "Human approval required before running Regression Sentinel.";
+      } else if (err.status === 400) {
+        errorMsg = "Fix ID does not match the approved candidate fix.";
+      } else if (err.status === 404) {
+        errorMsg = `Incident #${incidentId} not found.`;
+      }
+      setSentinelError(errorMsg);
+    } finally {
+      setRunningSentinel(false);
+    }
+  };
+
+  // Handler for generating the evidence-backed GitHub PR payload (or live PR)
+  const handlePreparePr = async (fixId) => {
+    const targetFixId = fixId || approvalData?.fix_id;
+    if (!incidentId || !targetFixId || preparingPr) return;
+    setPreparingPr(true);
+    setPrError(null);
+    try {
+      const res = await api.createGitHubPr(incidentId, {
+        fix_id: targetFixId,
+      });
+      setPrData(res);
+    } catch (err) {
+      let errorMsg = err.message || "Failed to prepare GitHub PR.";
+      if (err.status === 412) {
+        errorMsg = "Human approval required before opening PR.";
+      } else if (err.status === 400) {
+        errorMsg = "Approved fix does not match requested fix ID.";
+      } else if (err.status === 404) {
+        errorMsg = `Incident #${incidentId} not found.`;
+      }
+      setPrError(errorMsg);
+    } finally {
+      setPreparingPr(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="workspace-container">
@@ -214,6 +345,13 @@ export default function InvestigationWorkspace({
   const impactPct = impactData ? Math.round((impactData.confidence || 0) * 100) : 0;
   const isFixesComplete = fixesData !== null && (fixesData.candidate_fixes?.length > 0 || fixesData.recommended_fix !== null);
   const fixCount = fixesData?.candidate_fixes?.length ?? 0;
+  const isApproved = approvalData?.status === "approved";
+  const isRejected = approvalData?.status === "rejected";
+  const isDecided = isApproved || isRejected;
+  const isSentinelPassed = sentinelData !== null && sentinelData.status === "passed" && sentinelData.safe_to_merge === true;
+  const isSentinelFailed = sentinelData !== null && (sentinelData.status === "failed" || sentinelData.safe_to_merge === false);
+  const isSentinelInconclusive = sentinelData !== null && sentinelData.status === "inconclusive";
+  const isSentinelComplete = sentinelData !== null;
 
   return (
     <div className="workspace-container">
@@ -415,28 +553,88 @@ export default function InvestigationWorkspace({
           <div className={`connector ${isFixesComplete ? "completed-line" : ""}`}></div>
 
           {/* Stage 7: Approval */}
-          <div className={`pipeline-step ${isFixesComplete ? "current" : ""}`}>
-            <div className="step-number">7</div>
+          <div
+            className={`pipeline-step ${
+              isApproved
+                ? "completed"
+                : isRejected
+                ? "completed"
+                : isFixesComplete
+                ? "current"
+                : ""
+            }`}
+          >
+            <div
+              className="step-number"
+              style={{
+                borderColor: isRejected ? "#fb7185" : undefined,
+                color: isRejected ? "#fb7185" : undefined,
+              }}
+            >
+              {isApproved ? "✓" : isRejected ? "✕" : "7"}
+            </div>
             <strong>Approval</strong>
-            <span>{isFixesComplete ? "Next Step" : "Pending"}</span>
+            <span style={{ color: isRejected ? "#fb7185" : undefined }}>
+              {isApproved
+                ? "✓ Authorized"
+                : isRejected
+                ? "✕ Rejected"
+                : isFixesComplete
+                ? "Next Step"
+                : "Pending"}
+            </span>
           </div>
 
-          <div className="connector"></div>
+          <div className={`connector ${isApproved ? "completed-line" : ""}`}></div>
 
           {/* Stage 8: Sentinel */}
-          <div className="pipeline-step">
-            <div className="step-number">8</div>
+          <div
+            className={`pipeline-step ${
+              isSentinelPassed
+                ? "completed"
+                : isSentinelFailed
+                ? "completed"
+                : isSentinelInconclusive
+                ? "completed"
+                : runningSentinel
+                ? "current"
+                : isApproved
+                ? "current"
+                : ""
+            }`}
+          >
+            <div
+              className="step-number"
+              style={{
+                borderColor: isSentinelFailed ? "#fb7185" : isSentinelInconclusive ? "#fbbf24" : undefined,
+                color: isSentinelFailed ? "#fb7185" : isSentinelInconclusive ? "#fbbf24" : undefined,
+              }}
+            >
+              {isSentinelPassed ? "✓" : isSentinelFailed ? "✕" : isSentinelInconclusive ? "⚠" : runningSentinel ? "…" : "8"}
+            </div>
             <strong>Sentinel</strong>
-            <span>Pending</span>
+            <span style={{ color: isSentinelFailed ? "#fb7185" : isSentinelInconclusive ? "#fbbf24" : undefined }}>
+              {isSentinelPassed
+                ? "✓ Passed"
+                : isSentinelFailed
+                ? "✕ Failed"
+                : isSentinelInconclusive
+                ? "⚠ Inconclusive"
+                : runningSentinel
+                ? "Running..."
+                : isApproved
+                ? "Next Step"
+                : "Pending"}
+            </span>
           </div>
 
-          <div className="connector"></div>
+          <div className={`connector ${isSentinelPassed ? "completed-line" : ""}`}></div>
 
           {/* Stage 9: GitHub PR */}
-          <div className="pipeline-step">
+          <div className={`pipeline-step ${isSentinelPassed ? "current" : ""}`}>
             <div className="step-number">9</div>
             <strong>GitHub PR</strong>
-            <span>Pending</span>
+            <span>{isSentinelPassed ? "Next Step" : "Pending"}</span>
           </div>
         </div>
       </section>
@@ -571,6 +769,9 @@ export default function InvestigationWorkspace({
 
       {/* Render Candidate Fixes View — always rendered; handles own lock state */}
       <CandidateFixesView
+        incidentId={incident.id}
+        service={incident.service}
+        rcaData={rcaData}
         fixesData={fixesData}
         loading={false}
         generating={generatingFixes}
@@ -578,6 +779,35 @@ export default function InvestigationWorkspace({
         impactComplete={isImpactComplete}
         onGenerate={handleGenerateFixes}
         onRetry={handleGenerateFixes}
+      />
+
+      {/* Render Human Approval Gate View — always rendered; handles own lock state */}
+      <HumanApprovalView
+        incidentId={incident.id}
+        service={incident.service}
+        environment={incident.environment}
+        fixesData={fixesData}
+        approvalData={approvalData}
+        loading={loadingApproval}
+        submitting={submittingApproval}
+        error={approvalError}
+        fixesComplete={isFixesComplete}
+        onSubmitApproval={handleSubmitApproval}
+        onRefresh={handleFetchApproval}
+      />
+
+      {/* Render Regression Sentinel View — always rendered; handles own lock state */}
+      <RegressionSentinelView
+        incidentId={incident.id}
+        service={incident.service}
+        environment={incident.environment}
+        fixesData={fixesData}
+        approvalData={approvalData}
+        sentinelData={sentinelData}
+        running={runningSentinel}
+        error={sentinelError}
+        fixesComplete={isFixesComplete}
+        onRunSentinel={handleRunRegressionSentinel}
       />
     </div>
   );
