@@ -51,7 +51,7 @@ def init_db() -> None:
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS evidence (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        verdict_id INTEGER NOT NULL,
+        verdict_id INTEGER,
         source TEXT NOT NULL,
         evidence_type TEXT NOT NULL,
         content TEXT NOT NULL,

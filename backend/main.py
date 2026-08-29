@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from database import init_db, get_db_connection
 from ingestion import normalize_and_redact_incident
+from evidence_collector import collect_evidence
 
 # Simple regex for email format validation
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
@@ -194,6 +195,10 @@ class IncidentIngestRequest(BaseModel):
         if not v_stripped:
             raise ValueError("Field cannot be empty or whitespace only")
         return v_stripped
+
+
+class CollectEvidenceRequest(BaseModel):
+    verdict_id: Optional[int] = Field(None, description="Optional verdict ID to link and persist collected evidence")
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +425,7 @@ def get_verdict_by_id(verdict_id: int):
 # ---------------------------------------------------------------------------
 
 @app.post("/verdicts/{verdict_id}/evidence", status_code=status.HTTP_201_CREATED)
-def create_evidence(verdict_id: int, payload: EvidenceCreate):
+def create_evidence_entry(verdict_id: int, payload: EvidenceCreate):
     """
     Create an evidence record linked to a verdict.
     Returns HTTP 404 if the verdict does not exist.
@@ -670,7 +675,7 @@ def create_graph_edge(verdict_id: int, payload: GraphEdgeCreate):
 
 
 # ---------------------------------------------------------------------------
-# Incident Ingestion Endpoints
+# Incident Ingestion & Evidence Collection Endpoints
 # ---------------------------------------------------------------------------
 
 @app.post("/api/v1/ingest", status_code=status.HTTP_201_CREATED)
@@ -758,6 +763,64 @@ def get_incident(incident_id: int):
             pass
 
     return incident_record
+
+
+@app.post("/api/v1/incidents/{incident_id}/collect-evidence", status_code=status.HTTP_200_OK)
+def collect_incident_evidence(incident_id: int, payload: Optional[CollectEvidenceRequest] = None):
+    """
+    Collect structured evidence for an incident:
+    - Incident Memory (searches historical incidents in SQLite)
+    - Safe local/mock GitHub evidence (no network requests)
+    - Runtime telemetry / stack trace
+    Optionally stores evidence in SQLite if verdict_id is provided.
+    """
+    verdict_id = payload.verdict_id if payload else None
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # 1. Verify incident exists
+    cursor.execute("SELECT * FROM incidents WHERE id = ?;", (incident_id,))
+    incident_row = cursor.fetchone()
+    if incident_row is None:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident with ID {incident_id} not found"
+        )
+
+    incident = dict(incident_row)
+    if incident.get("metadata"):
+        try:
+            incident["metadata"] = json.loads(incident["metadata"])
+        except Exception:
+            pass
+
+    # 2. Verify verdict if specified
+    if verdict_id is not None:
+        cursor.execute("SELECT id FROM verdicts WHERE id = ?;", (verdict_id,))
+        if cursor.fetchone() is None:
+            conn.close()
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Verdict with ID {verdict_id} not found"
+            )
+
+    try:
+        evidence_list = collect_evidence(incident, verdict_id=verdict_id, conn=conn)
+        return {
+            "status": "success",
+            "incident_id": incident_id,
+            "evidence_count": len(evidence_list),
+            "evidence": evidence_list
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to collect evidence: {str(exc)}"
+        )
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
