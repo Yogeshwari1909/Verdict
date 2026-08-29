@@ -13,6 +13,7 @@ from database import init_db, get_db_connection
 from ingestion import normalize_and_redact_incident
 from evidence_collector import collect_evidence
 from evidence_graph import build_incident_graph
+from rca_engine import analyze_incident_rca
 
 # Simple regex for email format validation
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
@@ -897,6 +898,68 @@ def build_incident_evidence_graph(incident_id: int, payload: Optional[BuildGraph
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to build evidence graph: {str(exc)}"
+        )
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/incidents/{incident_id}/analyze", status_code=status.HTTP_200_OK)
+def analyze_incident(incident_id: int):
+    """
+    Executes the deterministic RCA Reasoning & Cross-Examination engine.
+    Cross-examines evidence from the incident and its Evidence Graph to evaluate
+    and score hypotheses based strictly on proof.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # 1. Verify incident exists
+    cursor.execute("SELECT * FROM incidents WHERE id = ?;", (incident_id,))
+    incident_row = cursor.fetchone()
+    if incident_row is None:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident with ID {incident_id} not found"
+        )
+
+    incident = dict(incident_row)
+    if incident.get("metadata"):
+        try:
+            incident["metadata"] = json.loads(incident["metadata"])
+        except Exception:
+            pass
+
+    try:
+        # Find associated verdict if any
+        verdict_title = f"Incident #{incident_id}: {incident.get('exception_type')} on {incident.get('endpoint')}"
+        cursor.execute("SELECT id FROM verdicts WHERE title = ?;", (verdict_title,))
+        v_row = cursor.fetchone()
+        verdict_id = v_row["id"] if v_row else None
+
+        # Collect evidence & graph
+        collected_evidence = collect_evidence(incident, verdict_id=verdict_id, conn=conn)
+
+        # Build or retrieve graph
+        graph_result = build_incident_graph(
+            incident=incident,
+            collected_evidence=collected_evidence,
+            verdict_id=verdict_id,
+            conn=conn
+        )
+        graph = graph_result.get("graph", {"nodes": [], "edges": []})
+
+        # Run deterministic RCA engine
+        rca_result = analyze_incident_rca(
+            incident=incident,
+            graph=graph,
+            collected_evidence=collected_evidence
+        )
+        return rca_result.to_dict()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to analyze incident: {str(exc)}"
         )
     finally:
         conn.close()
