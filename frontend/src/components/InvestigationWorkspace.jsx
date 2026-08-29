@@ -3,6 +3,8 @@ import { api } from "../api/client";
 import EvidenceCollectorView from "./EvidenceCollectorView";
 import EvidenceGraphView from "./EvidenceGraphView";
 import RCAAnalysisView from "./RCAAnalysisView";
+import BlastRadiusView from "./BlastRadiusView";
+import CandidateFixesView from "./CandidateFixesView";
 
 export default function InvestigationWorkspace({
   incidentId,
@@ -26,6 +28,16 @@ export default function InvestigationWorkspace({
   const [rcaData, setRcaData] = useState(null);
   const [analyzingRca, setAnalyzingRca] = useState(false);
   const [rcaError, setRcaError] = useState(null);
+
+  // Blast Radius / Impact State
+  const [impactData, setImpactData] = useState(null);
+  const [analyzingImpact, setAnalyzingImpact] = useState(false);
+  const [impactError, setImpactError] = useState(null);
+
+  // Candidate Fixes State
+  const [fixesData, setFixesData] = useState(null);
+  const [generatingFixes, setGeneratingFixes] = useState(false);
+  const [fixesError, setFixesError] = useState(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -120,6 +132,48 @@ export default function InvestigationWorkspace({
     }
   };
 
+  // Handler for running (or re-running) the Blast Radius / Impact Analysis
+  const handleAnalyzeImpact = async () => {
+    if (!incidentId || analyzingImpact) return;
+    setAnalyzingImpact(true);
+    setImpactError(null);
+    try {
+      const res = await api.getImpact(incidentId);
+      if (res && res.impact_level !== undefined) {
+        setImpactData(res);
+      } else {
+        setImpactError("Backend returned an unexpected impact response.");
+      }
+    } catch (err) {
+      setImpactError(
+        err.message || "Failed to analyze blast radius for this incident."
+      );
+    } finally {
+      setAnalyzingImpact(false);
+    }
+  };
+
+  // Handler for generating (or re-generating) the 3 Candidate Fixes
+  const handleGenerateFixes = async () => {
+    if (!incidentId || generatingFixes) return;
+    setGeneratingFixes(true);
+    setFixesError(null);
+    try {
+      const res = await api.getCandidateFixes(incidentId);
+      if (res && res.candidate_fixes !== undefined) {
+        setFixesData(res);
+      } else {
+        setFixesError("Backend returned an unexpected fixes response.");
+      }
+    } catch (err) {
+      setFixesError(
+        err.message || "Failed to generate candidate fixes for this incident."
+      );
+    } finally {
+      setGeneratingFixes(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="workspace-container">
@@ -155,6 +209,11 @@ export default function InvestigationWorkspace({
   const isGraphBuilt = graphData !== null && (graphData.graph?.nodes?.length ?? 0) > 0;
   const isRcaComplete = rcaData !== null && (rcaData.confidence > 0 || rcaData.hypotheses?.length > 0);
   const rcaPct = rcaData ? Math.round((rcaData.confidence || 0) * 100) : 0;
+  const isImpactComplete = impactData !== null && impactData.impact_level !== undefined;
+  const impactLevel = impactData ? (impactData.impact_level || "unknown").toUpperCase() : "";
+  const impactPct = impactData ? Math.round((impactData.confidence || 0) * 100) : 0;
+  const isFixesComplete = fixesData !== null && (fixesData.candidate_fixes?.length > 0 || fixesData.recommended_fix !== null);
+  const fixCount = fixesData?.candidate_fixes?.length ?? 0;
 
   return (
     <div className="workspace-container">
@@ -298,28 +357,68 @@ export default function InvestigationWorkspace({
           <div className={`connector ${isRcaComplete ? "completed-line" : ""}`}></div>
 
           {/* Stage 5: Impact */}
-          <div className={`pipeline-step ${isRcaComplete ? "current" : ""}`}>
-            <div className="step-number">5</div>
+          <div
+            className={`pipeline-step ${
+              isImpactComplete
+                ? "completed"
+                : analyzingImpact
+                ? "current"
+                : isRcaComplete
+                ? "current"
+                : ""
+            }`}
+          >
+            <div className="step-number">
+              {isImpactComplete ? "✓" : analyzingImpact ? "…" : "5"}
+            </div>
             <strong>Impact</strong>
-            <span>{isRcaComplete ? "Next Step" : "Pending"}</span>
+            <span>
+              {isImpactComplete
+                ? `${impactLevel} · ${impactPct}%`
+                : analyzingImpact
+                ? "Analyzing..."
+                : isRcaComplete
+                ? "Next Step"
+                : "Pending"}
+            </span>
           </div>
 
-          <div className="connector"></div>
+          <div className={`connector ${isImpactComplete ? "completed-line" : ""}`}></div>
 
           {/* Stage 6: 3 Fixes */}
-          <div className="pipeline-step">
-            <div className="step-number">6</div>
+          <div
+            className={`pipeline-step ${
+              isFixesComplete
+                ? "completed"
+                : generatingFixes
+                ? "current"
+                : isImpactComplete
+                ? "current"
+                : ""
+            }`}
+          >
+            <div className="step-number">
+              {isFixesComplete ? "✓" : generatingFixes ? "…" : "6"}
+            </div>
             <strong>3 Fixes</strong>
-            <span>Pending</span>
+            <span>
+              {isFixesComplete
+                ? `${fixCount} Fix${fixCount !== 1 ? "es" : ""}`
+                : generatingFixes
+                ? "Generating..."
+                : isImpactComplete
+                ? "Next Step"
+                : "Pending"}
+            </span>
           </div>
 
-          <div className="connector"></div>
+          <div className={`connector ${isFixesComplete ? "completed-line" : ""}`}></div>
 
           {/* Stage 7: Approval */}
-          <div className="pipeline-step">
+          <div className={`pipeline-step ${isFixesComplete ? "current" : ""}`}>
             <div className="step-number">7</div>
             <strong>Approval</strong>
-            <span>Pending</span>
+            <span>{isFixesComplete ? "Next Step" : "Pending"}</span>
           </div>
 
           <div className="connector"></div>
@@ -457,6 +556,28 @@ export default function InvestigationWorkspace({
         graphBuilt={isGraphBuilt}
         onRunRca={handleAnalyzeRca}
         onRetry={handleAnalyzeRca}
+      />
+
+      {/* Render Blast Radius / Impact View — always rendered; handles own lock state */}
+      <BlastRadiusView
+        impactData={impactData}
+        loading={false}
+        analyzing={analyzingImpact}
+        error={impactError}
+        rcaComplete={isRcaComplete}
+        onAnalyze={handleAnalyzeImpact}
+        onRetry={handleAnalyzeImpact}
+      />
+
+      {/* Render Candidate Fixes View — always rendered; handles own lock state */}
+      <CandidateFixesView
+        fixesData={fixesData}
+        loading={false}
+        generating={generatingFixes}
+        error={fixesError}
+        impactComplete={isImpactComplete}
+        onGenerate={handleGenerateFixes}
+        onRetry={handleGenerateFixes}
       />
     </div>
   );

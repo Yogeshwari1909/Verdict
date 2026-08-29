@@ -1478,3 +1478,728 @@ nav {
     gap: 12px;
   }
 }
+
+/* ============================================================
+   BLAST RADIUS / IMPACT VIEW
+   ============================================================ */
+
+/* Lock state */
+.blast-locked .incident-card {
+  border-color: #232836;
+  opacity: 0.8;
+}
+
+/* Main verdict card */
+.blast-verdict-card {
+  background: #0d0f14;
+  border: 1px solid;
+  border-radius: 12px;
+  padding: 22px 24px;
+  margin-bottom: 20px;
+}
+
+.blast-verdict-eyebrow {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  color: #8b5cf6;
+  text-transform: uppercase;
+  margin-bottom: 14px;
+}
+
+.blast-verdict-body {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  flex-wrap: wrap;
+}
+
+/* Large impact level badge */
+.blast-level-badge {
+  font-size: 28px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  border: 2px solid;
+  border-radius: 10px;
+  padding: 10px 22px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  white-space: nowrap;
+}
+
+/* Confidence section beside the badge */
+.blast-conf-block {
+  flex: 1;
+  min-width: 140px;
+}
+
+.blast-conf-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: #6b7280;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.blast-conf-pct {
+  font-size: 34px;
+  font-weight: 800;
+  line-height: 1;
+  margin-bottom: 4px;
+}
+
+.blast-conf-sub {
+  font-size: 10px;
+  color: #6b7280;
+  margin-bottom: 8px;
+}
+
+.blast-conf-bar-wrap {
+  height: 5px;
+  background: #1a1d28;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.blast-conf-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+
+/* UNKNOWN / inconclusive state */
+.blast-unknown-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  color: #9ca3af;
+}
+
+.blast-unknown-msg p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Section blocks */
+.blast-block {
+  margin-bottom: 20px;
+}
+
+.blast-block-header {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  color: #6b7280;
+  text-transform: uppercase;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Service / Environment row */
+.blast-service-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.blast-service-item {
+  background: #101218;
+  border: 1px solid #20232c;
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.blast-service-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #6b7280;
+  text-transform: uppercase;
+}
+
+.blast-service-value {
+  font-size: 14px;
+  font-weight: 700;
+  color: #f4f4f5;
+}
+
+/* Scope blocks */
+.blast-scope-block {
+  background: #101218;
+  border: 1px solid #20232c;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+}
+
+.blast-scope-heading {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #9ca3af;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.blast-scope-icon {
+  font-size: 12px;
+}
+
+.blast-scope-count {
+  margin-left: auto;
+  background: #1a1d28;
+  border: 1px solid #232836;
+  border-radius: 10px;
+  font-size: 9px;
+  font-weight: 700;
+  color: #8b5cf6;
+  padding: 1px 7px;
+}
+
+.blast-scope-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.blast-scope-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.blast-scope-item-dot {
+  color: #8b5cf6;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.blast-scope-code {
+  font-family: "Courier New", "Consolas", monospace;
+  font-size: 12px;
+  color: #e2e8f0;
+  background: #0d0f14;
+  border: 1px solid #232836;
+  border-radius: 4px;
+  padding: 2px 7px;
+  word-break: break-all;
+}
+
+/* No-scope fallback */
+.blast-empty-scope {
+  font-size: 11px;
+  color: #6b7280;
+  font-style: italic;
+  padding: 8px 0;
+}
+
+/* Evidence reference rows */
+.blast-evidence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.blast-evidence-row {
+  background: #101218;
+  border: 1px solid #1a1d28;
+  border-left: 3px solid #38bdf8;
+  border-radius: 6px;
+  padding: 10px 14px;
+}
+
+.blast-evidence-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.blast-evidence-id {
+  font-size: 9px;
+  font-weight: 700;
+  color: #6b7280;
+  font-family: "Courier New", monospace;
+}
+
+.blast-evidence-type {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #38bdf8;
+  background: #0c1f2e;
+  border: 1px solid #1e4060;
+  border-radius: 3px;
+  padding: 1px 6px;
+}
+
+.blast-evidence-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #d1d5db;
+  word-break: break-all;
+}
+
+.blast-evidence-contrib {
+  font-size: 11px;
+  color: #9ca3af;
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* Limitations */
+.blast-limitations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.blast-limitation-item {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 12px;
+  color: #9ca3af;
+  background: #0e0c09;
+  border: 1px solid #1f1a10;
+  border-radius: 6px;
+  padding: 8px 14px;
+  line-height: 1.5;
+}
+
+.blast-limitation-icon {
+  color: #fbbf24;
+  font-size: 14px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+@media (max-width: 700px) {
+  .blast-service-row {
+    grid-template-columns: 1fr;
+  }
+
+  .blast-verdict-body {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 16px;
+  }
+
+  .blast-level-badge {
+    font-size: 20px;
+  }
+}
+/* ============================================================
+   CANDIDATE FIXES VIEW
+   ============================================================ */
+
+/* Lock state */
+.fixes-locked .incident-card {
+  border-color: #232836;
+  opacity: 0.8;
+}
+
+/* Safety notice banner */
+.fixes-safety-notice {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  background: #0d0f14;
+  border: 1px solid #232836;
+  border-left: 3px solid #8b5cf6;
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.fixes-safety-notice strong {
+  display: block;
+  color: #e2e8f0;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.fixes-safety-notice p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.fixes-safety-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+/* Root cause reference */
+.fixes-root-cause-ref {
+  background: #0f0d1a;
+  border: 1px solid #3b1f6b;
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin-bottom: 20px;
+}
+
+.fixes-root-cause-label {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: #8b5cf6;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.fixes-root-cause-text {
+  font-size: 12px;
+  color: #c4b5fd;
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* Section block headers */
+.fixes-block {
+  margin-bottom: 24px;
+}
+
+.fixes-block-header {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  color: #6b7280;
+  text-transform: uppercase;
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Grid for all 3 fixes side-by-side */
+.fixes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+/* Individual fix card */
+.fix-card {
+  background: #101218;
+  border: 1px solid;
+  border-radius: 12px;
+  padding: 20px;
+  position: relative;
+  transition: transform 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.fix-card:hover {
+  transform: translateY(-2px);
+}
+
+.fix-card-recommended {
+  background: #0f0d1a;
+}
+
+/* ★ BACKEND RECOMMENDATION banner */
+.fix-recommended-banner {
+  position: absolute;
+  top: -1px;
+  left: 20px;
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  background: #7c3aed;
+  color: #fff;
+  padding: 3px 12px;
+  border-radius: 0 0 8px 8px;
+  text-transform: uppercase;
+}
+
+/* Header row inside each card */
+.fix-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.fix-card-title-block {
+  flex: 1;
+}
+
+.fix-card-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #e2e8f0;
+  margin-bottom: 4px;
+  line-height: 1.3;
+}
+
+.fix-card-id {
+  font-size: 9px;
+  color: #4b5563;
+  font-family: "Courier New", monospace;
+}
+
+.fix-card-badges {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+/* Strategy badge */
+.fix-strategy-badge {
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border: 1px solid;
+  border-radius: 4px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+/* Risk badge */
+.fix-risk-badge {
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid;
+  border-radius: 4px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+/* Rank score badge */
+.fix-rank-badge {
+  font-size: 9px;
+  font-weight: 700;
+  color: #9ca3af;
+  background: #1a1d28;
+  border: 1px solid #232836;
+  border-radius: 4px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+/* Strategy tagline */
+.fix-strategy-tagline {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  margin-top: -8px;
+}
+
+/* Description text */
+.fix-description {
+  font-size: 12px;
+  color: #9ca3af;
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* Generic section inside a fix card */
+.fix-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fix-section-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  color: #6b7280;
+  text-transform: uppercase;
+}
+
+.fix-section-text {
+  font-size: 12px;
+  color: #9ca3af;
+  line-height: 1.55;
+  margin: 0;
+}
+
+/* Affected files / functions block */
+.fix-affected-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fix-affected-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fix-affected-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #6b7280;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+
+.fix-affected-code {
+  font-family: "Courier New", "Consolas", monospace;
+  font-size: 11px;
+  color: #e2e8f0;
+  background: #0d0f14;
+  border: 1px solid #232836;
+  border-radius: 4px;
+  padding: 3px 8px;
+  word-break: break-all;
+  display: inline-block;
+}
+
+/* Validation plan checklist */
+.fix-validation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fix-validation-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 11px;
+  color: #9ca3af;
+  line-height: 1.5;
+}
+
+.fix-validation-num {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  background: #1a1d28;
+  border: 1px solid #8b5cf6;
+  border-radius: 50%;
+  font-size: 9px;
+  font-weight: 700;
+  color: #8b5cf6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+}
+
+.fix-validation-notice {
+  font-size: 10px;
+  color: #6b7280;
+  font-style: italic;
+  padding: 4px 0 0;
+}
+
+/* Evidence items inside fix card */
+.fix-evidence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fix-evidence-item {
+  background: #0d0f14;
+  border: 1px solid #1a1d28;
+  border-left: 3px solid #8b5cf6;
+  border-radius: 5px;
+  padding: 8px 12px;
+}
+
+.fix-evidence-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.fix-evidence-id {
+  font-size: 9px;
+  font-weight: 700;
+  color: #6b7280;
+  font-family: "Courier New", monospace;
+}
+
+.fix-evidence-type {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8b5cf6;
+  background: #1c1330;
+  border: 1px solid #3b1f6b;
+  border-radius: 3px;
+  padding: 1px 6px;
+}
+
+.fix-evidence-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #d1d5db;
+  word-break: break-all;
+}
+
+.fix-evidence-reason {
+  font-size: 11px;
+  color: #9ca3af;
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* Limitations inside fix card */
+.fix-limitation-item {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 11px;
+  color: #9ca3af;
+  line-height: 1.5;
+}
+
+.fix-limitation-icon {
+  color: #fbbf24;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* Global limitations list at bottom */
+.fixes-limitations-list {
+  background: #101218;
+  border: 1px solid #20232c;
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+@media (max-width: 800px) {
+  .fixes-grid {
+    grid-template-columns: 1fr;
+  }
+}
