@@ -1,0 +1,55 @@
+import sqlite3
+from pathlib import Path
+
+# Path to verdict.db inside backend directory
+DB_PATH = Path(__file__).resolve().parent / "verdict.db"
+
+
+def get_db_connection() -> sqlite3.Connection:
+    """
+    Opens a connection to the SQLite database and configures
+    row_factory so rows can be accessed by column name.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON;")
+    return conn
+
+
+def init_db() -> None:
+    """
+    Initializes the SQLite database and creates the users and verdicts
+    tables if they do not already exist.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Create users table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    # Create verdicts table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS verdicts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    );
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+if __name__ == "__main__":
+    init_db()
+    print(f"Database initialized successfully at {DB_PATH}")

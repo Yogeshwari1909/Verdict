@@ -1,10 +1,21 @@
 import traceback
+from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="Verdict Backend", version="1.0.0")
+from database import init_db, get_db_connection
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialize SQLite database and tables on startup
+    init_db()
+    yield
+
+
+app = FastAPI(title="Verdict Backend", version="1.0.0", lifespan=lifespan)
 
 # Enable CORS for Next.js frontend (default port 3000) or other clients
 app.add_middleware(
@@ -50,6 +61,28 @@ def health_check():
         "status": "ok",
         "service": "verdict-backend"
     }
+
+
+@app.get("/db-status")
+def db_status():
+    """Database connectivity status check."""
+    try:
+        conn = get_db_connection()
+        conn.execute("SELECT 1")
+        conn.close()
+        return {
+            "database": "connected",
+            "status": "ok"
+        }
+    except Exception as exc:
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "database": "error",
+                "status": "failed",
+                "detail": str(exc)
+            }
+        )
 
 
 @app.post("/checkout")
