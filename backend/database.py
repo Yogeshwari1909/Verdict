@@ -19,8 +19,8 @@ def get_db_connection() -> sqlite3.Connection:
 def init_db() -> None:
     """
     Initializes the SQLite database and creates the users, verdicts,
-    evidence, evidence_graph_nodes, and evidence_graph_edges tables
-    if they do not already exist.
+    evidence, evidence_graph_nodes, evidence_graph_edges, and incidents
+    tables if they do not already exist.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -85,6 +85,25 @@ def init_db() -> None:
         FOREIGN KEY(verdict_id) REFERENCES verdicts(id) ON DELETE CASCADE,
         FOREIGN KEY(source_node_id) REFERENCES evidence_graph_nodes(id) ON DELETE CASCADE,
         FOREIGN KEY(target_node_id) REFERENCES evidence_graph_nodes(id) ON DELETE CASCADE
+    );
+    """)
+
+    # Create incidents table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS incidents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        service TEXT NOT NULL,
+        environment TEXT NOT NULL,
+        endpoint TEXT NOT NULL,
+        http_method TEXT NOT NULL,
+        status_code INTEGER NOT NULL,
+        exception_type TEXT NOT NULL,
+        exception_message TEXT NOT NULL,
+        stack_trace TEXT NOT NULL,
+        request_id TEXT,
+        timestamp TEXT,
+        metadata TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """)
 

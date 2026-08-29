@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from database import init_db, get_db_connection
+from ingestion import normalize_and_redact_incident
 
 # Simple regex for email format validation
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
@@ -162,6 +163,36 @@ class GraphEdgeCreate(BaseModel):
         v_stripped = v.strip()
         if not v_stripped:
             raise ValueError("relationship cannot be empty or whitespace only")
+        return v_stripped
+
+
+class IncidentIngestRequest(BaseModel):
+    service: str = Field(..., min_length=1, description="Originating service name")
+    environment: str = Field(..., min_length=1, description="Deployment environment (e.g. 'production', 'staging')")
+    endpoint: str = Field(..., min_length=1, description="Failing HTTP endpoint")
+    http_method: str = Field(..., min_length=1, description="HTTP method (GET, POST, etc.)")
+    status_code: int = Field(..., description="HTTP status code (e.g. 500)")
+    exception_type: str = Field(..., min_length=1, description="Exception class name")
+    exception_message: str = Field(..., min_length=1, description="Exception error message")
+    stack_trace: str = Field(..., min_length=1, description="Stack trace or traceback log")
+    request_id: Optional[str] = Field(None, description="Optional request correlation ID")
+    timestamp: Optional[str] = Field(None, description="Optional timestamp of the incident")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Optional metadata object")
+
+    @field_validator(
+        "service",
+        "environment",
+        "endpoint",
+        "http_method",
+        "exception_type",
+        "exception_message",
+        "stack_trace",
+    )
+    @classmethod
+    def validate_non_empty(cls, v: str) -> str:
+        v_stripped = v.strip()
+        if not v_stripped:
+            raise ValueError("Field cannot be empty or whitespace only")
         return v_stripped
 
 
@@ -636,6 +667,97 @@ def create_graph_edge(verdict_id: int, payload: GraphEdgeCreate):
         )
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Incident Ingestion Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/v1/ingest", status_code=status.HTTP_201_CREATED)
+def ingest_incident(payload: IncidentIngestRequest):
+    """
+    Ingest a new runtime failure or regression incident.
+    Normalizes data, redacts sensitive secrets/tokens, and stores in SQLite.
+    """
+    # Normalize and redact the incoming payload
+    normalized = normalize_and_redact_incident(payload.model_dump())
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    metadata_json = json.dumps(normalized["metadata"]) if normalized["metadata"] is not None else None
+
+    try:
+        cursor.execute("""
+            INSERT INTO incidents (
+                service, environment, endpoint, http_method, status_code,
+                exception_type, exception_message, stack_trace, request_id,
+                timestamp, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """, (
+            normalized["service"],
+            normalized["environment"],
+            normalized["endpoint"],
+            normalized["http_method"],
+            normalized["status_code"],
+            normalized["exception_type"],
+            normalized["exception_message"],
+            normalized["stack_trace"],
+            normalized["request_id"],
+            normalized["timestamp"],
+            metadata_json
+        ))
+        conn.commit()
+        new_id = cursor.lastrowid
+        cursor.execute("SELECT * FROM incidents WHERE id = ?;", (new_id,))
+        row = cursor.fetchone()
+        incident_record = dict(row)
+        if incident_record.get("metadata") is not None:
+            try:
+                incident_record["metadata"] = json.loads(incident_record["metadata"])
+            except Exception:
+                pass
+
+        return {
+            "status": "success",
+            "incident_id": new_id,
+            "incident": incident_record
+        }
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to ingest incident: {str(exc)}"
+        )
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/incidents/{incident_id}")
+def get_incident(incident_id: int):
+    """
+    Retrieve an ingested incident by ID.
+    Returns HTTP 404 if not found.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM incidents WHERE id = ?;", (incident_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident with ID {incident_id} not found"
+        )
+
+    incident_record = dict(row)
+    if incident_record.get("metadata") is not None:
+        try:
+            incident_record["metadata"] = json.loads(incident_record["metadata"])
+        except Exception:
+            pass
+
+    return incident_record
 
 
 # ---------------------------------------------------------------------------
