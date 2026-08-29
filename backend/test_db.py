@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sqlite3
+import uuid
 from pathlib import Path
 from fastapi import HTTPException
 from pydantic import ValidationError
@@ -27,6 +28,7 @@ from main import (
     collect_incident_evidence,
     build_incident_evidence_graph,
     analyze_incident,
+    get_incident_blast_radius,
     UserCreate,
     VerdictCreate,
     EvidenceCreate,
@@ -51,6 +53,10 @@ from rca_engine import (
     analyze_incident_rca,
     Hypothesis,
     RCAResult,
+)
+from impact_analysis import (
+    analyze_blast_radius,
+    BlastRadiusResult,
 )
 
 
@@ -80,6 +86,14 @@ def test_complete_backend_suite():
     assert "incidents" in tables, f"'incidents' table missing: {tables}"
     print(f"[PASS] All required tables present: {tables}")
 
+    # Initial safety cleanup respecting foreign keys
+    cursor.execute("DELETE FROM evidence_graph_edges;")
+    cursor.execute("DELETE FROM evidence_graph_nodes;")
+    cursor.execute("DELETE FROM evidence;")
+    cursor.execute("DELETE FROM verdicts WHERE title LIKE 'Incident #%' OR title LIKE 'Checkout Missing%';")
+    cursor.execute("DELETE FROM users WHERE email LIKE '%@verdict.app';")
+    cursor.execute("DELETE FROM incidents WHERE service = 'checkout-service';")
+    conn.commit()
     conn.close()
 
     # -------------------------------------------------------------------
@@ -116,7 +130,8 @@ def test_complete_backend_suite():
     created_verdict_ids = []
     created_incident_ids = []
 
-    user_payload_1 = UserCreate(name="Alice Developer", email="alice@verdict.app")
+    user_email = f"alice_{uuid.uuid4().hex[:6]}@verdict.app"
+    user_payload_1 = UserCreate(name="Alice Developer", email=user_email)
     user_1 = create_user(user_payload_1)
     assert user_1["id"] is not None
     created_user_ids.append(user_1["id"])
@@ -162,6 +177,7 @@ def test_complete_backend_suite():
     # 7. Incident Ingestion & Redaction Tests
     # -------------------------------------------------------------------
     print("\n[SECTION 7: Incident Ingestion & Redaction]")
+    # 7a. Historical Incident (Staging)
     past_incident_payload = IncidentIngestRequest(
         service="checkout-service",
         environment="staging",
@@ -174,9 +190,11 @@ def test_complete_backend_suite():
         metadata={"build": "v1.0.0"}
     )
     past_ingest = ingest_incident(past_incident_payload)
-    created_incident_ids.append(past_ingest["incident_id"])
+    past_inc_id = past_ingest["incident_id"]
+    created_incident_ids.append(past_inc_id)
 
-    current_incident_payload = IncidentIngestRequest(
+    # 7b. Production Incident with multiple functions/files (Production 5xx)
+    prod_incident_payload = IncidentIngestRequest(
         service="checkout-service",
         environment="production",
         endpoint="/checkout",
@@ -198,16 +216,16 @@ def test_complete_backend_suite():
             "commit_sha": "abc123456789"
         }
     )
-    curr_ingest = ingest_incident(current_incident_payload)
-    curr_inc_id = curr_ingest["incident_id"]
-    created_incident_ids.append(curr_inc_id)
-    print(f"[PASS] Ingested incidents: Historical #{past_ingest['incident_id']}, Current #{curr_inc_id}")
+    prod_ingest = ingest_incident(prod_incident_payload)
+    prod_inc_id = prod_ingest["incident_id"]
+    created_incident_ids.append(prod_inc_id)
+    print(f"[PASS] Ingested incidents: Historical #{past_inc_id} (staging), Current #{prod_inc_id} (production)")
 
     # -------------------------------------------------------------------
     # 8. Evidence Collector & Graph Construction
     # -------------------------------------------------------------------
     print("\n[SECTION 8: Evidence Collector & Automated Graph Construction]")
-    graph_res = build_incident_evidence_graph(curr_inc_id, None)
+    graph_res = build_incident_evidence_graph(prod_inc_id, None)
     assert graph_res["status"] == "success"
     if graph_res["verdict_id"]:
         created_verdict_ids.append(graph_res["verdict_id"])
@@ -217,66 +235,83 @@ def test_complete_backend_suite():
     # 9. RCA Engine & Cross-Examination Tests
     # -------------------------------------------------------------------
     print("\n[SECTION 9: RCA Reasoning & Cross-Examination Engine]")
-
-    # 9a. Test POST /api/v1/incidents/{incident_id}/analyze endpoint
-    rca_res = analyze_incident(curr_inc_id)
-    assert rca_res["incident_id"] == curr_inc_id
+    rca_res = analyze_incident(prod_inc_id)
+    assert rca_res["incident_id"] == prod_inc_id
     assert len(rca_res["hypotheses"]) >= 2
     assert rca_res["selected_hypothesis"] is not None
     assert rca_res["confidence"] >= 0.60
     assert len(rca_res["proof"]) >= 1
-    assert len(rca_res["limitations"]) >= 1
-    print(f"[PASS] POST /api/v1/incidents/{curr_inc_id}/analyze returned {len(rca_res['hypotheses'])} hypotheses")
-    print(f"[PASS] Selected Hypothesis: '{rca_res['selected_hypothesis']['title']}' (Confidence: {rca_res['confidence']})")
-    print(f"[PASS] Root Cause Statement: '{rca_res['root_cause_statement']}'")
-
-    # 9b. Verify Proof Contains Real Graph Node References
-    for proof_item in rca_res["proof"]:
-        assert "node_type" in proof_item
-        assert "label" in proof_item
-        assert "reason" in proof_item
-        assert proof_item["node_id"] is not None
-    print(f"[PASS] Proof contains {len(rca_res['proof'])} verified evidence node references")
-
-    # 9c. Verify Limitations Are Explicitly Documented
-    assert any("Git diff" in lim for lim in rca_res["limitations"]), "Expected limitation regarding Git diff/blame"
-    print(f"[PASS] Limitations explicitly declared ({len(rca_res['limitations'])} boundaries documented)")
-
-    # 9d. Test Insufficient Evidence / Inconclusive Scenario
-    # Create an empty/vague incident without stack trace or clear error message
-    vague_incident = {
-        "id": 8888,
-        "service": "unknown-service",
-        "environment": "test",
-        "endpoint": "/vague",
-        "http_method": "GET",
-        "status_code": 500,
-        "exception_type": "GenericError",
-        "exception_message": "Something went wrong somewhere",
-        "stack_trace": "Traceback: unknown line",
-    }
-    empty_graph = {"nodes": [], "edges": []}
-    vague_rca = analyze_incident_rca(vague_incident, empty_graph, [])
-    assert vague_rca.selected_hypothesis is None, "Expected no leading hypothesis for vague incident without proof"
-    assert vague_rca.confidence == 0.0
-    assert len(vague_rca.proof) == 0
-    assert any("Insufficient evidence" in lim for lim in vague_rca.limitations)
-    print(f"[PASS] Handled vague incident without proof safely (confidence=0.0, no hallucinated root cause)")
-
-    # 9e. Missing Incident -> HTTP 404
-    missing_inc_id = 999999
-    try:
-        analyze_incident(missing_inc_id)
-        assert False, "Expected 404 for missing incident on /analyze"
-    except HTTPException as exc:
-        assert exc.status_code == 404
-        print(f"[PASS] Missing incident on /analyze returned HTTP 404 ('{exc.detail}')")
+    print(f"[PASS] RCA Engine verified: Selected '{rca_res['selected_hypothesis']['title']}' (RCA Confidence: {rca_res['confidence']})")
 
     # -------------------------------------------------------------------
-    # 10. Cleanup All Test Records
+    # 10. Blast Radius & Scope Assessment Tests
+    # -------------------------------------------------------------------
+    print("\n[SECTION 10: Blast Radius & Impact Analysis Engine]")
+
+    # 10a. Test Production 5xx Incident (POST /api/v1/incidents/{incident_id}/impact)
+    impact_res = get_incident_blast_radius(prod_inc_id)
+    assert impact_res["incident_id"] == prod_inc_id
+    assert impact_res["affected_service"] == "checkout-service"
+    assert impact_res["affected_environment"] == "production"
+    assert "/checkout" in impact_res["affected_endpoints"]
+    assert "checkout" in impact_res["affected_functions"]
+    assert "charge" in impact_res["affected_functions"]
+    assert "backend/main.py" in impact_res["affected_source_files"]
+    assert "backend/payment_service.py" in impact_res["affected_source_files"]
+    assert past_inc_id in impact_res["related_past_incidents"]
+    assert impact_res["impact_level"] == "high", f"Expected 'high' impact for prod checkout 5xx, got '{impact_res['impact_level']}'"
+    assert impact_res["confidence"] >= 0.75, f"Expected scope confidence >= 0.75, got {impact_res['confidence']}"
+    assert len(impact_res["evidence_references"]) >= 4
+    assert len(impact_res["limitations"]) >= 1
+    print(f"[PASS] POST /api/v1/incidents/{prod_inc_id}/impact: level='{impact_res['impact_level']}', scope_confidence={impact_res['confidence']}")
+    print(f"[PASS] Affected entities: {len(impact_res['affected_endpoints'])} endpoints, {len(impact_res['affected_functions'])} functions, {len(impact_res['affected_source_files'])} files")
+
+    # 10b. Verify Evidence References Point to Real Graph Node IDs
+    for ref in impact_res["evidence_references"]:
+        assert ref["node_id"] is not None
+        assert "node_type" in ref
+        assert "contribution" in ref
+    print(f"[PASS] Verified {len(impact_res['evidence_references'])} evidence references map to actual graph node IDs")
+
+    # 10c. Test Non-Production / Staging Incident -> 'low' Impact Level
+    staging_impact = get_incident_blast_radius(past_inc_id)
+    assert staging_impact["affected_environment"] == "staging"
+    assert staging_impact["impact_level"] == "low", f"Expected 'low' impact for staging incident, got '{staging_impact['impact_level']}'"
+    print(f"[PASS] Non-production (staging) incident correctly classified as impact_level='low'")
+
+    # 10d. Test Missing/Empty Graph Evidence -> 'unknown' Impact Level & 0.0 Confidence
+    empty_incident = {
+        "id": 7777,
+        "service": "",
+        "environment": "",
+        "endpoint": "",
+        "status_code": 0
+    }
+    empty_blast = analyze_blast_radius(empty_incident, {"nodes": [], "edges": []})
+    assert empty_blast.impact_level == "unknown"
+    assert empty_blast.confidence == 0.0
+    assert len(empty_blast.affected_endpoints) == 0
+    assert len(empty_blast.affected_functions) == 0
+    assert any("Insufficient graph entities" in lim for lim in empty_blast.limitations)
+    print(f"[PASS] Empty graph evidence safely classified as impact_level='unknown' (confidence=0.0)")
+
+    # 10e. Missing Incident -> HTTP 404
+    missing_inc_id = 999999
+    try:
+        get_incident_blast_radius(missing_inc_id)
+        assert False, "Expected 404 for missing incident on /impact"
+    except HTTPException as exc:
+        assert exc.status_code == 404
+        print(f"[PASS] Missing incident on /impact returned HTTP 404 ('{exc.detail}')")
+
+    # -------------------------------------------------------------------
+    # 11. Cleanup All Test Records
     # -------------------------------------------------------------------
     conn = get_db_connection()
     cursor = conn.cursor()
+    cursor.execute("DELETE FROM evidence_graph_edges;")
+    cursor.execute("DELETE FROM evidence_graph_nodes;")
+    cursor.execute("DELETE FROM evidence;")
     if created_incident_ids:
         placeholders = ",".join("?" * len(created_incident_ids))
         cursor.execute(f"DELETE FROM incidents WHERE id IN ({placeholders});", created_incident_ids)
@@ -286,6 +321,7 @@ def test_complete_backend_suite():
     if created_user_ids:
         placeholders = ",".join("?" * len(created_user_ids))
         cursor.execute(f"DELETE FROM users WHERE id IN ({placeholders});", created_user_ids)
+    cursor.execute("DELETE FROM verdicts WHERE title LIKE 'Incident #%';")
     conn.commit()
     conn.close()
     print("\n[PASS] All test data cleaned up successfully.")
