@@ -19,7 +19,8 @@ def get_db_connection() -> sqlite3.Connection:
 def init_db() -> None:
     """
     Initializes the SQLite database and creates the users, verdicts,
-    and evidence tables if they do not already exist.
+    evidence, evidence_graph_nodes, and evidence_graph_edges tables
+    if they do not already exist.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -56,6 +57,34 @@ def init_db() -> None:
         content TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(verdict_id) REFERENCES verdicts(id) ON DELETE CASCADE
+    );
+    """)
+
+    # Create evidence_graph_nodes table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS evidence_graph_nodes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        verdict_id INTEGER NOT NULL,
+        node_type TEXT NOT NULL,
+        label TEXT NOT NULL,
+        data TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(verdict_id) REFERENCES verdicts(id) ON DELETE CASCADE
+    );
+    """)
+
+    # Create evidence_graph_edges table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS evidence_graph_edges (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        verdict_id INTEGER NOT NULL,
+        source_node_id INTEGER NOT NULL,
+        target_node_id INTEGER NOT NULL,
+        relationship TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(verdict_id) REFERENCES verdicts(id) ON DELETE CASCADE,
+        FOREIGN KEY(source_node_id) REFERENCES evidence_graph_nodes(id) ON DELETE CASCADE,
+        FOREIGN KEY(target_node_id) REFERENCES evidence_graph_nodes(id) ON DELETE CASCADE
     );
     """)
 

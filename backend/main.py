@@ -1,3 +1,4 @@
+import json
 import re
 import sqlite3
 import traceback
@@ -12,6 +13,22 @@ from database import init_db, get_db_connection
 
 # Simple regex for email format validation
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
+
+# Supported Evidence Graph Node Types
+SUPPORTED_NODE_TYPES = {
+    "api_request",
+    "endpoint",
+    "exception",
+    "stack_trace",
+    "function",
+    "source_file",
+    "git_blame",
+    "commit",
+    "diff",
+    "deploy",
+    "past_incident",
+    "test_result",
+}
 
 
 @asynccontextmanager
@@ -107,6 +124,44 @@ class EvidenceCreate(BaseModel):
         v_stripped = v.strip()
         if not v_stripped:
             raise ValueError("Content cannot be empty or whitespace only")
+        return v_stripped
+
+
+class GraphNodeCreate(BaseModel):
+    node_type: str = Field(..., min_length=1, description="Supported type of node in the evidence graph")
+    label: str = Field(..., min_length=1, description="Human-readable label for this graph node")
+    data: Optional[Any] = Field(None, description="Optional JSON-compatible metadata or payload")
+
+    @field_validator("node_type")
+    @classmethod
+    def validate_node_type(cls, v: str) -> str:
+        v_stripped = v.strip().lower()
+        if not v_stripped:
+            raise ValueError("node_type cannot be empty or whitespace only")
+        if v_stripped not in SUPPORTED_NODE_TYPES:
+            raise ValueError(f"Unsupported node_type '{v}'. Must be one of: {sorted(SUPPORTED_NODE_TYPES)}")
+        return v_stripped
+
+    @field_validator("label")
+    @classmethod
+    def validate_label(cls, v: str) -> str:
+        v_stripped = v.strip()
+        if not v_stripped:
+            raise ValueError("label cannot be empty or whitespace only")
+        return v_stripped
+
+
+class GraphEdgeCreate(BaseModel):
+    source_node_id: int = Field(..., description="ID of source node in the graph")
+    target_node_id: int = Field(..., description="ID of target node in the graph")
+    relationship: str = Field(..., min_length=1, description="Description of the relationship")
+
+    @field_validator("relationship")
+    @classmethod
+    def validate_relationship(cls, v: str) -> str:
+        v_stripped = v.strip()
+        if not v_stripped:
+            raise ValueError("relationship cannot be empty or whitespace only")
         return v_stripped
 
 
@@ -342,7 +397,6 @@ def create_evidence(verdict_id: int, payload: EvidenceCreate):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Verify that the verdict exists
     cursor.execute("SELECT id FROM verdicts WHERE id = ?;", (verdict_id,))
     if cursor.fetchone() is None:
         conn.close()
@@ -383,7 +437,6 @@ def get_verdict_evidence(verdict_id: int):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Verify that the verdict exists
     cursor.execute("SELECT id FROM verdicts WHERE id = ?;", (verdict_id,))
     if cursor.fetchone() is None:
         conn.close()
@@ -399,6 +452,190 @@ def get_verdict_evidence(verdict_id: int):
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Evidence Graph Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/verdicts/{verdict_id}/graph/nodes", status_code=status.HTTP_201_CREATED)
+def create_graph_node(verdict_id: int, payload: GraphNodeCreate):
+    """
+    Create a graph node for an existing verdict.
+    Returns HTTP 201 with created node data.
+    Returns HTTP 404 if the verdict does not exist.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Validate verdict existence
+    cursor.execute("SELECT id FROM verdicts WHERE id = ?;", (verdict_id,))
+    if cursor.fetchone() is None:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Verdict with ID {verdict_id} not found"
+        )
+
+    data_str = json.dumps(payload.data) if payload.data is not None else None
+
+    try:
+        cursor.execute(
+            "INSERT INTO evidence_graph_nodes (verdict_id, node_type, label, data) VALUES (?, ?, ?, ?);",
+            (verdict_id, payload.node_type, payload.label, data_str)
+        )
+        conn.commit()
+        new_id = cursor.lastrowid
+        cursor.execute(
+            "SELECT id, verdict_id, node_type, label, data, created_at FROM evidence_graph_nodes WHERE id = ?;",
+            (new_id,)
+        )
+        row = cursor.fetchone()
+        node_dict = dict(row)
+        if node_dict["data"] is not None:
+            try:
+                node_dict["data"] = json.loads(node_dict["data"])
+            except Exception:
+                pass
+        return node_dict
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create graph node: {str(exc)}"
+        )
+    finally:
+        conn.close()
+
+
+@app.get("/verdicts/{verdict_id}/graph")
+def get_verdict_graph(verdict_id: int):
+    """
+    Retrieve the evidence graph (nodes and edges) for a given verdict.
+    Returns HTTP 404 if the verdict does not exist.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Validate verdict existence
+    cursor.execute("SELECT id FROM verdicts WHERE id = ?;", (verdict_id,))
+    if cursor.fetchone() is None:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Verdict with ID {verdict_id} not found"
+        )
+
+    # Fetch nodes
+    cursor.execute(
+        "SELECT id, verdict_id, node_type, label, data, created_at FROM evidence_graph_nodes WHERE verdict_id = ? ORDER BY id ASC;",
+        (verdict_id,)
+    )
+    node_rows = cursor.fetchall()
+    nodes = []
+    for r in node_rows:
+        nd = dict(r)
+        if nd["data"] is not None:
+            try:
+                nd["data"] = json.loads(nd["data"])
+            except Exception:
+                pass
+        nodes.append(nd)
+
+    # Fetch edges
+    cursor.execute(
+        "SELECT id, verdict_id, source_node_id, target_node_id, relationship, created_at FROM evidence_graph_edges WHERE verdict_id = ? ORDER BY id ASC;",
+        (verdict_id,)
+    )
+    edge_rows = cursor.fetchall()
+    edges = [dict(r) for r in edge_rows]
+    conn.close()
+
+    return {
+        "verdict_id": verdict_id,
+        "nodes": nodes,
+        "edges": edges
+    }
+
+
+@app.post("/verdicts/{verdict_id}/graph/edges", status_code=status.HTTP_201_CREATED)
+def create_graph_edge(verdict_id: int, payload: GraphEdgeCreate):
+    """
+    Create a directed relationship/edge between two existing graph nodes.
+    Validates that:
+    1. The verdict exists.
+    2. Both source and target nodes exist and belong to the same verdict.
+    Returns HTTP 404 if any validation fails.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Validate verdict existence
+    cursor.execute("SELECT id FROM verdicts WHERE id = ?;", (verdict_id,))
+    if cursor.fetchone() is None:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Verdict with ID {verdict_id} not found"
+        )
+
+    # Validate source and target nodes
+    cursor.execute(
+        "SELECT id, verdict_id FROM evidence_graph_nodes WHERE id IN (?, ?);",
+        (payload.source_node_id, payload.target_node_id)
+    )
+    rows = cursor.fetchall()
+    found_nodes = {r["id"]: r["verdict_id"] for r in rows}
+
+    if payload.source_node_id not in found_nodes:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Source node with ID {payload.source_node_id} not found"
+        )
+
+    if payload.target_node_id not in found_nodes:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Target node with ID {payload.target_node_id} not found"
+        )
+
+    if found_nodes[payload.source_node_id] != verdict_id:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Source node {payload.source_node_id} does not belong to verdict {verdict_id}"
+        )
+
+    if found_nodes[payload.target_node_id] != verdict_id:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Target node {payload.target_node_id} does not belong to verdict {verdict_id}"
+        )
+
+    try:
+        cursor.execute(
+            "INSERT INTO evidence_graph_edges (verdict_id, source_node_id, target_node_id, relationship) VALUES (?, ?, ?, ?);",
+            (verdict_id, payload.source_node_id, payload.target_node_id, payload.relationship)
+        )
+        conn.commit()
+        new_edge_id = cursor.lastrowid
+        cursor.execute(
+            "SELECT id, verdict_id, source_node_id, target_node_id, relationship, created_at FROM evidence_graph_edges WHERE id = ?;",
+            (new_edge_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row)
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create graph edge: {str(exc)}"
+        )
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
