@@ -11,20 +11,24 @@ from main import (
     health_check,
     db_status,
     checkout,
+    create_user,
+    get_all_users,
+    get_user_by_id,
     create_verdict,
     get_all_verdicts,
     get_verdict_by_id,
-    VerdictCreate
+    UserCreate,
+    VerdictCreate,
 )
 
 
-def test_database_and_verdicts_crud():
+def test_complete_backend_suite():
     print("==================================================")
     print("        VERDICT BACKEND COMPREHENSIVE TESTS       ")
     print("==================================================")
     
     # -------------------------------------------------------------------
-    # 1. Database Foundation & Table Verification
+    # 1. Database Foundation & Schema Verification
     # -------------------------------------------------------------------
     print("\n[SECTION 1: Database Foundation & Schema]")
     init_db()
@@ -55,7 +59,7 @@ def test_database_and_verdicts_crud():
     conn.close()
 
     # -------------------------------------------------------------------
-    # 2. System Status & Existing Endpoints
+    # 2. System Status & Deliberate Failure Endpoints
     # -------------------------------------------------------------------
     print("\n[SECTION 2: System Status Endpoints]")
     health_res = health_check()
@@ -82,96 +86,168 @@ def test_database_and_verdicts_crud():
     asyncio.run(test_checkout())
 
     # -------------------------------------------------------------------
-    # 3. Verdicts CRUD Tests
+    # 3. Users API Tests
     # -------------------------------------------------------------------
-    print("\n[SECTION 3: Verdicts CRUD API]")
+    print("\n[SECTION 3: Users API]")
     
-    # 3a. Create a verdict (POST /verdicts)
-    payload_1 = VerdictCreate(title="Login Authentication Failure", status="investigating")
-    created_1 = create_verdict(payload_1)
-    assert created_1["id"] is not None
-    assert created_1["title"] == "Login Authentication Failure"
-    assert created_1["status"] == "investigating"
-    assert created_1["user_id"] is None
-    assert "created_at" in created_1
-    verdict_1_id = created_1["id"]
-    print(f"[PASS] POST /verdicts (without user_id): ID={verdict_1_id}, title='{created_1['title']}', status='{created_1['status']}'")
+    # Track IDs for cleanup
+    created_user_ids = []
+    created_verdict_ids = []
 
-    # 3b. Create a second verdict (with user_id)
-    # First insert a test user so foreign key is valid
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO users (name, email) VALUES (?, ?);", ("Alice", "alice@verdict.app"))
-    conn.commit()
-    cursor.execute("SELECT id FROM users WHERE email = ?;", ("alice@verdict.app",))
-    user_id = cursor.fetchone()["id"]
-    conn.close()
+    # 3a. Create a user (POST /users)
+    user_payload_1 = UserCreate(name="Alice Developer", email="alice@verdict.app")
+    user_1 = create_user(user_payload_1)
+    assert user_1["id"] is not None
+    assert user_1["name"] == "Alice Developer"
+    assert user_1["email"] == "alice@verdict.app"
+    assert "created_at" in user_1
+    created_user_ids.append(user_1["id"])
+    print(f"[PASS] POST /users: created user ID={user_1['id']}, name='{user_1['name']}', email='{user_1['email']}'")
 
-    payload_2 = VerdictCreate(user_id=user_id, title="Checkout Missing Payment Crash", status="open")
-    created_2 = create_verdict(payload_2)
-    assert created_2["id"] is not None
-    assert created_2["user_id"] == user_id
-    assert created_2["title"] == "Checkout Missing Payment Crash"
-    assert created_2["status"] == "open"
-    verdict_2_id = created_2["id"]
-    print(f"[PASS] POST /verdicts (with user_id={user_id}): ID={verdict_2_id}, title='{created_2['title']}'")
+    # 3b. Create a second user (POST /users)
+    user_payload_2 = UserCreate(name="Bob Tester", email="bob@verdict.app")
+    user_2 = create_user(user_payload_2)
+    assert user_2["id"] is not None
+    assert user_2["name"] == "Bob Tester"
+    assert user_2["email"] == "bob@verdict.app"
+    created_user_ids.append(user_2["id"])
+    print(f"[PASS] POST /users: created second user ID={user_2['id']}")
 
-    # 3c. Get all verdicts (GET /verdicts)
+    # 3c. Duplicate Email -> HTTP 409 Conflict
+    try:
+        create_user(UserCreate(name="Duplicate Alice", email="alice@verdict.app"))
+        assert False, "Expected HTTPException 409 on duplicate email"
+    except HTTPException as exc:
+        assert exc.status_code == 409
+        assert "already exists" in exc.detail
+        print(f"[PASS] POST /users duplicate email: correctly returned HTTP 409 ('{exc.detail}')")
+
+    # 3d. Get all users (GET /users)
+    all_users = get_all_users()
+    assert len(all_users) >= 2
+    user_ids = [u["id"] for u in all_users]
+    assert user_1["id"] in user_ids
+    assert user_2["id"] in user_ids
+    # Verify newest users first (descending ID)
+    user_indices = [user_ids.index(user_2["id"]), user_ids.index(user_1["id"])]
+    assert user_indices[0] < user_indices[1], "Users should be ordered newest first (descending ID)"
+    print(f"[PASS] GET /users: retrieved {len(all_users)} users ordered newest first")
+
+    # 3e. Get one user by ID (GET /users/{user_id})
+    fetched_user = get_user_by_id(user_1["id"])
+    assert fetched_user["id"] == user_1["id"]
+    assert fetched_user["name"] == "Alice Developer"
+    assert fetched_user["email"] == "alice@verdict.app"
+    print(f"[PASS] GET /users/{user_1['id']}: retrieved user matching ID")
+
+    # 3f. Missing user -> HTTP 404
+    missing_user_id = 999999
+    try:
+        get_user_by_id(missing_user_id)
+        assert False, "Expected HTTPException 404 for missing user"
+    except HTTPException as exc:
+        assert exc.status_code == 404
+        assert str(missing_user_id) in exc.detail
+        print(f"[PASS] GET /users/{missing_user_id}: correctly returned HTTP 404 ('{exc.detail}')")
+
+    # 3g. Validation: Invalid/Empty Name
+    try:
+        UserCreate(name="   ", email="valid@verdict.app")
+        assert False, "Expected ValidationError for whitespace-only name"
+    except ValidationError:
+        print("[PASS] Validation: rejected empty/whitespace name")
+
+    try:
+        UserCreate(name="", email="valid@verdict.app")
+        assert False, "Expected ValidationError for empty string name"
+    except ValidationError:
+        print("[PASS] Validation: rejected empty string name")
+
+    # 3h. Validation: Invalid Email
+    for invalid_email in ["not-an-email", "missing-at-domain.com", "user@", "@domain.com", ""]:
+        try:
+            UserCreate(name="Valid Name", email=invalid_email)
+            assert False, f"Expected ValidationError for invalid email '{invalid_email}'"
+        except ValidationError:
+            pass
+    print("[PASS] Validation: rejected all invalid email formats")
+
+    # -------------------------------------------------------------------
+    # 4. Verdicts CRUD Tests
+    # -------------------------------------------------------------------
+    print("\n[SECTION 4: Verdicts CRUD API]")
+    
+    # 4a. Create a verdict (POST /verdicts)
+    payload_v1 = VerdictCreate(title="Login Authentication Failure", status="investigating")
+    created_v1 = create_verdict(payload_v1)
+    assert created_v1["id"] is not None
+    assert created_v1["title"] == "Login Authentication Failure"
+    assert created_v1["status"] == "investigating"
+    assert created_v1["user_id"] is None
+    assert "created_at" in created_v1
+    created_verdict_ids.append(created_v1["id"])
+    print(f"[PASS] POST /verdicts (without user_id): ID={created_v1['id']}, title='{created_v1['title']}'")
+
+    # 4b. Create a verdict with valid user_id
+    payload_v2 = VerdictCreate(user_id=user_1["id"], title="Checkout Missing Payment Crash", status="open")
+    created_v2 = create_verdict(payload_v2)
+    assert created_v2["id"] is not None
+    assert created_v2["user_id"] == user_1["id"]
+    assert created_v2["title"] == "Checkout Missing Payment Crash"
+    created_verdict_ids.append(created_v2["id"])
+    print(f"[PASS] POST /verdicts (with user_id={user_1['id']}): ID={created_v2['id']}, title='{created_v2['title']}'")
+
+    # 4c. Get all verdicts (GET /verdicts)
     all_verdicts = get_all_verdicts()
     assert len(all_verdicts) >= 2
-    ids = [v["id"] for v in all_verdicts]
-    assert verdict_1_id in ids
-    assert verdict_2_id in ids
+    v_ids = [v["id"] for v in all_verdicts]
+    assert created_v1["id"] in v_ids
+    assert created_v2["id"] in v_ids
     print(f"[PASS] GET /verdicts: retrieved {len(all_verdicts)} records successfully")
 
-    # 3d. Get one verdict by ID (GET /verdicts/{verdict_id})
-    single_verdict = get_verdict_by_id(verdict_1_id)
-    assert single_verdict["id"] == verdict_1_id
+    # 4d. Get one verdict by ID (GET /verdicts/{verdict_id})
+    single_verdict = get_verdict_by_id(created_v1["id"])
+    assert single_verdict["id"] == created_v1["id"]
     assert single_verdict["title"] == "Login Authentication Failure"
-    print(f"[PASS] GET /verdicts/{verdict_1_id}: retrieved record matching ID")
+    print(f"[PASS] GET /verdicts/{created_v1['id']}: retrieved record matching ID")
 
-    # 3e. 404 for non-existent verdict
-    missing_id = 999999
+    # 4e. 404 for non-existent verdict
+    missing_v_id = 999999
     try:
-        get_verdict_by_id(missing_id)
+        get_verdict_by_id(missing_v_id)
         assert False, "Expected HTTPException 404 for missing verdict"
     except HTTPException as exc:
         assert exc.status_code == 404
-        assert str(missing_id) in exc.detail
-        print(f"[PASS] GET /verdicts/{missing_id}: correctly returned HTTP 404 ('{exc.detail}')")
+        assert str(missing_v_id) in exc.detail
+        print(f"[PASS] GET /verdicts/{missing_v_id}: correctly returned HTTP 404 ('{exc.detail}')")
 
-    # 3f. Validation: Missing / Empty Title
+    # 4f. Validation: Empty / Whitespace Verdict Fields
     try:
-        VerdictCreate(title="", status="open")
-        assert False, "Expected ValidationError for empty title"
+        VerdictCreate(title="   ", status="open")
+        assert False, "Expected ValidationError for whitespace title"
     except ValidationError:
-        print("[PASS] Pydantic validation: empty title rejected")
+        print("[PASS] Verdict validation: whitespace title rejected")
 
-    # 3g. Validation: Whitespace Title
     try:
-        create_verdict(VerdictCreate(title="   ", status="open"))
-        assert False, "Expected HTTPException 422 for whitespace title"
-    except HTTPException as exc:
-        assert exc.status_code == 422
-        print(f"[PASS] Endpoint validation: whitespace title rejected with HTTP {exc.status_code}")
-
-    # 3h. Validation: Missing / Empty Status
-    try:
-        VerdictCreate(title="Valid Title", status="")
-        assert False, "Expected ValidationError for empty status"
+        VerdictCreate(title="Valid Title", status="   ")
+        assert False, "Expected ValidationError for whitespace status"
     except ValidationError:
-        print("[PASS] Pydantic validation: empty status rejected")
+        print("[PASS] Verdict validation: whitespace status rejected")
 
     # -------------------------------------------------------------------
-    # Cleanup Test Records
+    # 5. Cleanup Test Records
     # -------------------------------------------------------------------
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM verdicts WHERE id IN (?, ?);", (verdict_1_id, verdict_2_id))
-    cursor.execute("DELETE FROM users WHERE id = ?;", (user_id,))
+    if created_verdict_ids:
+        placeholders = ",".join("?" * len(created_verdict_ids))
+        cursor.execute(f"DELETE FROM verdicts WHERE id IN ({placeholders});", created_verdict_ids)
+    if created_user_ids:
+        placeholders = ",".join("?" * len(created_user_ids))
+        cursor.execute(f"DELETE FROM users WHERE id IN ({placeholders});", created_user_ids)
     conn.commit()
     conn.close()
-    print("\n[PASS] Test data cleaned up successfully.")
+    print("\n[PASS] All test data cleaned up successfully.")
 
     print("\n==================================================")
     print("      ALL BACKEND TESTS PASSED SUCCESSFULLY!       ")
@@ -179,4 +255,4 @@ def test_database_and_verdicts_crud():
 
 
 if __name__ == "__main__":
-    test_database_and_verdicts_crud()
+    test_complete_backend_suite()
