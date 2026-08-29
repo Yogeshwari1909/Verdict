@@ -18,6 +18,7 @@ from impact_analysis import analyze_blast_radius
 from fix_engine import generate_candidate_fixes
 from approval import ApprovalRequest, get_approval_state, process_approval_decision
 from github_integration import GitHubPRCreateRequest, create_fix_pull_request
+from regression_sentinel import RegressionCheckRequest, run_regression_sentinel
 
 # Simple regex for email format validation
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
@@ -1285,6 +1286,90 @@ def create_incident_github_pr(incident_id: int, payload: GitHubPRCreateRequest):
             payload=payload
         )
         return pr_result.to_dict()
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/incidents/{incident_id}/regression-check", status_code=status.HTTP_200_OK)
+def check_incident_regression(incident_id: int, payload: RegressionCheckRequest):
+    """
+    Executes the Regression Sentinel validation checks against an approved candidate fix.
+    Ensures safe-to-merge verification based strictly on the fix's validation plan.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # 1. Verify incident exists
+    cursor.execute("SELECT * FROM incidents WHERE id = ?;", (incident_id,))
+    incident_row = cursor.fetchone()
+    if incident_row is None:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident with ID {incident_id} not found"
+        )
+
+    incident = dict(incident_row)
+    if incident.get("metadata"):
+        try:
+            incident["metadata"] = json.loads(incident["metadata"])
+        except Exception:
+            pass
+
+    try:
+        # Check human approval state first
+        approval_record = get_approval_state(incident_id, conn=conn)
+        if approval_record.get("status") != "approved":
+            raise HTTPException(
+                status_code=status.HTTP_412_PRECONDITION_FAILED,
+                detail=f"Human approval required before running Regression Sentinel. Current approval status for incident {incident_id} is '{approval_record.get('status')}'."
+            )
+
+        if approval_record.get("fix_id") != payload.fix_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Fix ID mismatch. Incident {incident_id} was approved for fix '{approval_record.get('fix_id')}', but regression check requested '{payload.fix_id}'."
+            )
+
+        # Find or create associated verdict
+        verdict_title = f"Incident #{incident_id}: {incident.get('exception_type')} on {incident.get('endpoint')}"
+        cursor.execute("SELECT id FROM verdicts WHERE title = ?;", (verdict_title,))
+        existing_v = cursor.fetchone()
+        if existing_v:
+            verdict_id = existing_v["id"]
+        else:
+            cursor.execute(
+                "INSERT INTO verdicts (title, status) VALUES (?, ?);",
+                (verdict_title, "investigating")
+            )
+            conn.commit()
+            verdict_id = cursor.lastrowid
+
+        collected_evidence = collect_evidence(incident, verdict_id=verdict_id, conn=conn)
+        graph_result = build_incident_graph(incident, collected_evidence=collected_evidence, verdict_id=verdict_id, conn=conn)
+        graph = graph_result.get("graph", {"nodes": [], "edges": []})
+
+        rca_result = analyze_incident_rca(incident, graph=graph, collected_evidence=collected_evidence)
+        impact_result = analyze_blast_radius(incident, graph=graph)
+        fix_plan = generate_candidate_fixes(incident, rca_result=rca_result.to_dict(), impact_result=impact_result.to_dict())
+
+        matching_fix = next((f for f in fix_plan.candidate_fixes if f.fix_id == payload.fix_id), None)
+        if not matching_fix:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Fix '{payload.fix_id}' does not exist in candidate fixes for incident {incident_id}."
+            )
+
+        # Run Regression Sentinel
+        sentinel_result = run_regression_sentinel(
+            incident=incident,
+            rca_result=rca_result.to_dict(),
+            impact_result=impact_result.to_dict(),
+            candidate_fix=matching_fix.to_dict(),
+            approval_record=approval_record,
+            conn=conn
+        )
+        return sentinel_result.to_dict()
     finally:
         conn.close()
 

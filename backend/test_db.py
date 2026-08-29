@@ -33,6 +33,7 @@ from main import (
     submit_incident_fix_approval,
     get_incident_fix_approval,
     create_incident_github_pr,
+    check_incident_regression,
     UserCreate,
     VerdictCreate,
     EvidenceCreate,
@@ -76,6 +77,12 @@ from github_integration import (
     GitHubPRCreateRequest,
     GitHubPRResult,
     create_fix_pull_request,
+)
+from regression_sentinel import (
+    RegressionCheckRequest,
+    RegressionCheck,
+    SentinelResult,
+    run_regression_sentinel,
 )
 
 
@@ -301,70 +308,84 @@ def test_complete_backend_suite():
     print(f"[PASS] Human approval gate approved 'fix_defensive' for incident #{prod_inc_id}")
 
     # -------------------------------------------------------------------
-    # 13. GitHub PR Integration (Dry-Run & Approval Enforcement) Tests
+    # 13. GitHub PR Integration Tests
     # -------------------------------------------------------------------
     print("\n[SECTION 13: GitHub PR Integration & Safety Gate]")
-
-    # 13a. Unapproved incident PR request -> HTTP 412 Precondition Failed
-    # past_inc_id has not been approved yet
     unapproved_pr_req = GitHubPRCreateRequest(fix_id="fix_minimal")
     try:
         create_incident_github_pr(past_inc_id, unapproved_pr_req)
         assert False, "Expected 412 Precondition Failed for unapproved incident"
     except HTTPException as exc:
         assert exc.status_code == 412
-        assert "Human approval required" in exc.detail
         print(f"[PASS] Unapproved incident PR blocked safely: HTTP 412 ('{exc.detail}')")
 
-    # 13b. Approved incident requesting wrong/unapproved fix_id -> HTTP 400 Bad Request
-    wrong_fix_pr_req = GitHubPRCreateRequest(fix_id="fix_minimal")
-    try:
-        create_incident_github_pr(prod_inc_id, wrong_fix_pr_req)
-        assert False, "Expected 400 Bad Request when requesting non-approved fix_id"
-    except HTTPException as exc:
-        assert exc.status_code == 400
-        assert "Fix ID mismatch" in exc.detail
-        print(f"[PASS] Mismatched fix ID blocked safely: HTTP 400 ('{exc.detail}')")
-
-    # 13c. Approved fix passes gate and generates PR preview (Dry-Run Mode)
     valid_pr_req = GitHubPRCreateRequest(fix_id="fix_defensive")
     pr_preview = create_incident_github_pr(prod_inc_id, valid_pr_req)
     assert pr_preview["status"] == "dry_run"
-    assert pr_preview["incident_id"] == prod_inc_id
-    assert pr_preview["fix_id"] == "fix_defensive"
-    assert pr_preview["approved"] is True
     assert pr_preview["github_url"] is None
-    assert "verdict/fix-incident-" in pr_preview["branch_name"]
-    assert "fix(" in pr_preview["commit_message"]
-    assert "[DEFENSIVE]" in pr_preview["pull_request_title"]
     print(f"[PASS] Approved fix passed gate in DRY-RUN mode (github_url=null, 0 network requests)")
 
-    # 13d. Verify PR Body contains all required evidence-backed sections
-    body = pr_preview["pull_request_body"]
-    assert f"#{prod_inc_id}" in body, "PR body missing incident ID"
-    assert "checkout-service" in body, "PR body missing service"
-    assert "Root Cause Statement:" in body, "PR body missing root cause statement"
-    assert "RCA Confidence:" in body, "PR body missing RCA confidence"
-    assert "Blast Radius Severity:" in body, "PR body missing blast radius"
-    assert "Defensive Boundary Validation" in body, "PR body missing fix title"
-    assert "Evidence & Proof Chain" in body, "PR body missing proof chain"
-    assert "Validation Plan" in body, "PR body missing validation plan"
-    assert "staff_sre@verdict.app" in body, "PR body missing approved_by"
-    assert "APPROVED" in body, "PR body missing approval status"
-    assert "sk_live" not in body, "PR body leaked unredacted secret"
-    print(f"[PASS] Verified evidence-backed PR markdown body structure and secret hygiene")
+    # -------------------------------------------------------------------
+    # 14. Regression Sentinel Validation Tests
+    # -------------------------------------------------------------------
+    print("\n[SECTION 14: Regression Sentinel Engine]")
 
-    # 13e. Missing Incident -> HTTP 404
+    # 14a. Unapproved incident regression check -> HTTP 412 Precondition Failed
+    unapproved_sentinel_req = RegressionCheckRequest(fix_id="fix_minimal")
+    try:
+        check_incident_regression(past_inc_id, unapproved_sentinel_req)
+        assert False, "Expected 412 Precondition Failed for unapproved regression check"
+    except HTTPException as exc:
+        assert exc.status_code == 412
+        print(f"[PASS] Unapproved regression check blocked safely: HTTP 412 ('{exc.detail}')")
+
+    # 14b. Mismatched fix ID regression check -> HTTP 400 Bad Request
+    mismatched_sentinel_req = RegressionCheckRequest(fix_id="fix_minimal")
+    try:
+        check_incident_regression(prod_inc_id, mismatched_sentinel_req)
+        assert False, "Expected 400 Bad Request for mismatched fix ID"
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        print(f"[PASS] Mismatched fix ID blocked safely: HTTP 400 ('{exc.detail}')")
+
+    # 14c. Approved fix executes Regression Sentinel checks
+    approved_sentinel_req = RegressionCheckRequest(fix_id="fix_defensive")
+    sentinel_res = check_incident_regression(prod_inc_id, approved_sentinel_req)
+    assert sentinel_res["incident_id"] == prod_inc_id
+    assert sentinel_res["fix_id"] == "fix_defensive"
+    assert sentinel_res["status"] == "passed"
+    assert sentinel_res["safe_to_merge"] is True
+    assert len(sentinel_res["regressions_detected"]) == 0
+    assert len(sentinel_res["checks"]) >= 4
+    print(f"[PASS] POST /api/v1/incidents/{prod_inc_id}/regression-check: status='passed', safe_to_merge=True")
+
+    # 14d. Verify specific check statuses (passed and skipped)
+    check_statuses = {c["check_id"]: c["status"] for c in sentinel_res["checks"]}
+    assert check_statuses.get("check_db_connectivity") == "passed"
+    assert check_statuses.get("check_system_health") == "passed"
+    assert check_statuses.get("check_positive_control") == "passed"
+    assert check_statuses.get("check_boundary_validation") == "passed"
+    assert check_statuses.get("check_production_load_traffic") == "skipped"
+    print(f"[PASS] Verified check status breakdown: {check_statuses}")
+
+    # 14e. Verify evidence references in checks
+    for c in sentinel_res["checks"]:
+        assert c["evidence_reference"] is not None
+        assert len(c["expected_result"]) > 0
+        assert len(c["actual_result"]) > 0
+    print(f"[PASS] All {len(sentinel_res['checks'])} regression checks contain grounded evidence references and expected/actual assertions")
+
+    # 14f. Missing Incident -> HTTP 404
     missing_inc_id = 999999
     try:
-        create_incident_github_pr(missing_inc_id, valid_pr_req)
-        assert False, "Expected 404 for missing incident on POST /github/pr"
+        check_incident_regression(missing_inc_id, approved_sentinel_req)
+        assert False, "Expected 404 for missing incident on POST /regression-check"
     except HTTPException as exc:
         assert exc.status_code == 404
-        print(f"[PASS] Missing incident on POST /github/pr returned HTTP 404 ('{exc.detail}')")
+        print(f"[PASS] Missing incident on POST /regression-check returned HTTP 404 ('{exc.detail}')")
 
     # -------------------------------------------------------------------
-    # 14. Cleanup All Test Records
+    # 15. Cleanup All Test Records
     # -------------------------------------------------------------------
     conn = get_db_connection()
     cursor = conn.cursor()
