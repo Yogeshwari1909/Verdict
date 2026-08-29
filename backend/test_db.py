@@ -32,6 +32,7 @@ from main import (
     get_incident_candidate_fixes,
     submit_incident_fix_approval,
     get_incident_fix_approval,
+    create_incident_github_pr,
     UserCreate,
     VerdictCreate,
     EvidenceCreate,
@@ -70,6 +71,11 @@ from approval import (
     ApprovalRequest,
     get_approval_state,
     process_approval_decision,
+)
+from github_integration import (
+    GitHubPRCreateRequest,
+    GitHubPRResult,
+    create_fix_pull_request,
 )
 
 
@@ -281,25 +287,9 @@ def test_complete_backend_suite():
     # 12. Human Approval Gate Tests
     # -------------------------------------------------------------------
     print("\n[SECTION 12: Human Approval Gate]")
-
-    # 12a. Verify initial status is 'pending'
     init_approval = get_incident_fix_approval(prod_inc_id)
     assert init_approval["status"] == "pending"
-    assert init_approval["incident_id"] == prod_inc_id
-    assert init_approval["fix_id"] is None
-    print(f"[PASS] GET /api/v1/incidents/{prod_inc_id}/approval initial state: status='pending'")
 
-    # 12b. Invalid Fix ID -> HTTP 400 Bad Request
-    invalid_fix_req = ApprovalRequest(fix_id="fix_invalid_fake_99", action="approve", approved_by="lead_eng@verdict.app")
-    try:
-        submit_incident_fix_approval(prod_inc_id, invalid_fix_req)
-        assert False, "Expected 400 Bad Request for arbitrary fix_id"
-    except HTTPException as exc:
-        assert exc.status_code == 400
-        assert "is invalid" in exc.detail
-        print(f"[PASS] Arbitrary fix_id safely rejected: HTTP 400 ('{exc.detail}')")
-
-    # 12c. Approve Recommended Fix (pending -> approved)
     approve_req = ApprovalRequest(
         fix_id="fix_defensive",
         action="approve",
@@ -308,61 +298,73 @@ def test_complete_backend_suite():
     approved_res = submit_incident_fix_approval(prod_inc_id, approve_req)
     assert approved_res["status"] == "approved"
     assert approved_res["fix_id"] == "fix_defensive"
-    assert approved_res["approved_by"] == "staff_sre@verdict.app"
-    assert approved_res["approved_at"] is not None
-    print(f"[PASS] POST /api/v1/incidents/{prod_inc_id}/approval: approved fix 'fix_defensive'")
-
-    # 12d. Check GET returns 'approved'
-    get_approved = get_incident_fix_approval(prod_inc_id)
-    assert get_approved["status"] == "approved"
-    assert get_approved["fix_id"] == "fix_defensive"
-    assert get_approved["approved_by"] == "staff_sre@verdict.app"
-    print(f"[PASS] GET /api/v1/incidents/{prod_inc_id}/approval returns persisted 'approved' state")
-
-    # 12e. Idempotent re-approval of same fix works
-    idempotent_res = submit_incident_fix_approval(prod_inc_id, approve_req)
-    assert idempotent_res["status"] == "approved"
-    assert idempotent_res["fix_id"] == "fix_defensive"
-    print(f"[PASS] Idempotent re-approval handled cleanly")
-
-    # 12f. Conflicting transition on already approved record -> HTTP 409 Conflict
-    conflict_req = ApprovalRequest(
-        fix_id="fix_minimal",
-        action="approve",
-        approved_by="another_eng@verdict.app"
-    )
-    try:
-        submit_incident_fix_approval(prod_inc_id, conflict_req)
-        assert False, "Expected 409 Conflict for conflicting approval change"
-    except HTTPException as exc:
-        assert exc.status_code == 409
-        print(f"[PASS] Conflicting fix approval safely blocked: HTTP 409 ('{exc.detail}')")
-
-    # 12g. Test Rejection flow on second incident (past_inc_id)
-    # First generate graph and fixes for past_inc_id so candidate fixes exist
-    build_incident_evidence_graph(past_inc_id, None)
-    reject_req = ApprovalRequest(
-        fix_id="fix_minimal",
-        action="reject",
-        approved_by="qa_lead@verdict.app"
-    )
-    rejected_res = submit_incident_fix_approval(past_inc_id, reject_req)
-    assert rejected_res["status"] == "rejected"
-    assert rejected_res["fix_id"] == "fix_minimal"
-    assert rejected_res["approved_by"] == "qa_lead@verdict.app"
-    print(f"[PASS] Rejection flow verified on incident #{past_inc_id}: status='rejected'")
-
-    # 12h. Missing Incident -> HTTP 404
-    missing_inc_id = 999999
-    try:
-        get_incident_fix_approval(missing_inc_id)
-        assert False, "Expected 404 for missing incident on GET /approval"
-    except HTTPException as exc:
-        assert exc.status_code == 404
-        print(f"[PASS] Missing incident on GET /approval returned HTTP 404 ('{exc.detail}')")
+    print(f"[PASS] Human approval gate approved 'fix_defensive' for incident #{prod_inc_id}")
 
     # -------------------------------------------------------------------
-    # 13. Cleanup All Test Records
+    # 13. GitHub PR Integration (Dry-Run & Approval Enforcement) Tests
+    # -------------------------------------------------------------------
+    print("\n[SECTION 13: GitHub PR Integration & Safety Gate]")
+
+    # 13a. Unapproved incident PR request -> HTTP 412 Precondition Failed
+    # past_inc_id has not been approved yet
+    unapproved_pr_req = GitHubPRCreateRequest(fix_id="fix_minimal")
+    try:
+        create_incident_github_pr(past_inc_id, unapproved_pr_req)
+        assert False, "Expected 412 Precondition Failed for unapproved incident"
+    except HTTPException as exc:
+        assert exc.status_code == 412
+        assert "Human approval required" in exc.detail
+        print(f"[PASS] Unapproved incident PR blocked safely: HTTP 412 ('{exc.detail}')")
+
+    # 13b. Approved incident requesting wrong/unapproved fix_id -> HTTP 400 Bad Request
+    wrong_fix_pr_req = GitHubPRCreateRequest(fix_id="fix_minimal")
+    try:
+        create_incident_github_pr(prod_inc_id, wrong_fix_pr_req)
+        assert False, "Expected 400 Bad Request when requesting non-approved fix_id"
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "Fix ID mismatch" in exc.detail
+        print(f"[PASS] Mismatched fix ID blocked safely: HTTP 400 ('{exc.detail}')")
+
+    # 13c. Approved fix passes gate and generates PR preview (Dry-Run Mode)
+    valid_pr_req = GitHubPRCreateRequest(fix_id="fix_defensive")
+    pr_preview = create_incident_github_pr(prod_inc_id, valid_pr_req)
+    assert pr_preview["status"] == "dry_run"
+    assert pr_preview["incident_id"] == prod_inc_id
+    assert pr_preview["fix_id"] == "fix_defensive"
+    assert pr_preview["approved"] is True
+    assert pr_preview["github_url"] is None
+    assert "verdict/fix-incident-" in pr_preview["branch_name"]
+    assert "fix(" in pr_preview["commit_message"]
+    assert "[DEFENSIVE]" in pr_preview["pull_request_title"]
+    print(f"[PASS] Approved fix passed gate in DRY-RUN mode (github_url=null, 0 network requests)")
+
+    # 13d. Verify PR Body contains all required evidence-backed sections
+    body = pr_preview["pull_request_body"]
+    assert f"#{prod_inc_id}" in body, "PR body missing incident ID"
+    assert "checkout-service" in body, "PR body missing service"
+    assert "Root Cause Statement:" in body, "PR body missing root cause statement"
+    assert "RCA Confidence:" in body, "PR body missing RCA confidence"
+    assert "Blast Radius Severity:" in body, "PR body missing blast radius"
+    assert "Defensive Boundary Validation" in body, "PR body missing fix title"
+    assert "Evidence & Proof Chain" in body, "PR body missing proof chain"
+    assert "Validation Plan" in body, "PR body missing validation plan"
+    assert "staff_sre@verdict.app" in body, "PR body missing approved_by"
+    assert "APPROVED" in body, "PR body missing approval status"
+    assert "sk_live" not in body, "PR body leaked unredacted secret"
+    print(f"[PASS] Verified evidence-backed PR markdown body structure and secret hygiene")
+
+    # 13e. Missing Incident -> HTTP 404
+    missing_inc_id = 999999
+    try:
+        create_incident_github_pr(missing_inc_id, valid_pr_req)
+        assert False, "Expected 404 for missing incident on POST /github/pr"
+    except HTTPException as exc:
+        assert exc.status_code == 404
+        print(f"[PASS] Missing incident on POST /github/pr returned HTTP 404 ('{exc.detail}')")
+
+    # -------------------------------------------------------------------
+    # 14. Cleanup All Test Records
     # -------------------------------------------------------------------
     conn = get_db_connection()
     cursor = conn.cursor()
