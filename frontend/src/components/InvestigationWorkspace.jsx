@@ -1,14 +1,31 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import EvidenceCollectorView from "./EvidenceCollectorView";
+import EvidenceGraphView from "./EvidenceGraphView";
+import RCAAnalysisView from "./RCAAnalysisView";
 
 export default function InvestigationWorkspace({
   incidentId,
   onBack,
-  onStartEvidenceCollection,
 }) {
   const [incident, setIncident] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  // Evidence Collector State
+  const [evidence, setEvidence] = useState([]);
+  const [collectingEvidence, setCollectingEvidence] = useState(false);
+  const [evidenceError, setEvidenceError] = useState(null);
+
+  // Evidence Graph State
+  const [graphData, setGraphData] = useState(null);
+  const [buildingGraph, setBuildingGraph] = useState(false);
+  const [graphError, setGraphError] = useState(null);
+
+  // RCA / Cross-Examination State
+  const [rcaData, setRcaData] = useState(null);
+  const [analyzingRca, setAnalyzingRca] = useState(false);
+  const [rcaError, setRcaError] = useState(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -42,6 +59,67 @@ export default function InvestigationWorkspace({
     };
   }, [incidentId]);
 
+  // Handler for collecting multi-source evidence from SQLite & safe GitHub context
+  const handleCollectEvidence = async () => {
+    if (!incidentId || collectingEvidence) return;
+    setCollectingEvidence(true);
+    setEvidenceError(null);
+    try {
+      const res = await api.collectEvidence(incidentId);
+      if (res && res.evidence) {
+        setEvidence(res.evidence);
+      }
+    } catch (err) {
+      setEvidenceError(
+        err.message || "Failed to collect multi-source evidence for this incident."
+      );
+    } finally {
+      setCollectingEvidence(false);
+    }
+  };
+
+  // Handler for building (or rebuilding) the Evidence Graph from backend
+  const handleBuildGraph = async () => {
+    if (!incidentId || buildingGraph) return;
+    setBuildingGraph(true);
+    setGraphError(null);
+    try {
+      const res = await api.buildGraph(incidentId);
+      if (res && res.graph) {
+        setGraphData(res);
+      } else {
+        setGraphError("Backend returned an unexpected graph response.");
+      }
+    } catch (err) {
+      setGraphError(
+        err.message || "Failed to build the Evidence Graph for this incident."
+      );
+    } finally {
+      setBuildingGraph(false);
+    }
+  };
+
+  // Handler for running (or re-running) the RCA Cross-Examination Engine
+  const handleAnalyzeRca = async () => {
+    if (!incidentId || analyzingRca) return;
+    setAnalyzingRca(true);
+    setRcaError(null);
+    try {
+      const res = await api.analyzeRca(incidentId);
+      if (res && (res.hypotheses !== undefined || res.confidence !== undefined)) {
+        setRcaData(res);
+      } else {
+        setRcaError("Backend returned an unexpected RCA response.");
+      }
+    } catch (err) {
+      setRcaError(
+        err.message || "Failed to run RCA analysis for this incident."
+      );
+    } finally {
+      setAnalyzingRca(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="workspace-container">
@@ -73,6 +151,10 @@ export default function InvestigationWorkspace({
   }
 
   const isCritical = incident.status_code >= 500;
+  const isEvidenceCollected = evidence.length > 0;
+  const isGraphBuilt = graphData !== null && (graphData.graph?.nodes?.length ?? 0) > 0;
+  const isRcaComplete = rcaData !== null && (rcaData.confidence > 0 || rcaData.hypotheses?.length > 0);
+  const rcaPct = rcaData ? Math.round((rcaData.confidence || 0) * 100) : 0;
 
   return (
     <div className="workspace-container">
@@ -119,46 +201,112 @@ export default function InvestigationWorkspace({
         </div>
 
         <div className="pipeline workspace-pipeline">
+          {/* Stage 1: Incident */}
           <div className="pipeline-step completed">
             <div className="step-number">✓</div>
             <strong>Incident</strong>
             <span>Captured</span>
           </div>
 
-          <div className="connector completed-line"></div>
+          <div
+            className={`connector ${
+              isEvidenceCollected ? "completed-line" : ""
+            }`}
+          ></div>
 
-          <div className="pipeline-step current">
-            <div className="step-number">2</div>
+          {/* Stage 2: Evidence */}
+          <div
+            className={`pipeline-step ${
+              isEvidenceCollected
+                ? "completed"
+                : collectingEvidence
+                ? "current"
+                : "current"
+            }`}
+          >
+            <div className="step-number">
+              {isEvidenceCollected ? "✓" : "2"}
+            </div>
             <strong>Evidence</strong>
-            <span>Ready to Collect</span>
+            <span>
+              {isEvidenceCollected
+                ? `${evidence.length} Collected`
+                : collectingEvidence
+                ? "Collecting..."
+                : "Ready"}
+            </span>
           </div>
 
           <div className="connector"></div>
 
-          <div className="pipeline-step">
-            <div className="step-number">3</div>
+          {/* Stage 3: Graph */}
+          <div
+            className={`pipeline-step ${
+              isGraphBuilt
+                ? "completed"
+                : buildingGraph
+                ? "current"
+                : isEvidenceCollected
+                ? "current"
+                : ""
+            }`}
+          >
+            <div className="step-number">
+              {isGraphBuilt ? "✓" : buildingGraph ? "…" : "3"}
+            </div>
             <strong>Graph</strong>
-            <span>Pending</span>
+            <span>
+              {isGraphBuilt
+                ? `${graphData.nodes_created ?? graphData.graph?.nodes?.length} Nodes · ${graphData.edges_created ?? graphData.graph?.edges?.length} Edges`
+                : buildingGraph
+                ? "Building..."
+                : isEvidenceCollected
+                ? "Next Step"
+                : "Pending"}
+            </span>
           </div>
 
-          <div className="connector"></div>
+          <div className={`connector ${isGraphBuilt ? "completed-line" : ""}`}></div>
 
-          <div className="pipeline-step">
-            <div className="step-number">4</div>
+          {/* Stage 4: RCA */}
+          <div
+            className={`pipeline-step ${
+              isRcaComplete
+                ? "completed"
+                : analyzingRca
+                ? "current"
+                : isGraphBuilt
+                ? "current"
+                : ""
+            }`}
+          >
+            <div className="step-number">
+              {isRcaComplete ? "✓" : analyzingRca ? "…" : "4"}
+            </div>
             <strong>RCA</strong>
-            <span>Pending</span>
+            <span>
+              {isRcaComplete
+                ? `${rcaPct}% Confidence`
+                : analyzingRca
+                ? "Cross-Examining..."
+                : isGraphBuilt
+                ? "Next Step"
+                : "Pending"}
+            </span>
           </div>
 
-          <div className="connector"></div>
+          <div className={`connector ${isRcaComplete ? "completed-line" : ""}`}></div>
 
-          <div className="pipeline-step">
+          {/* Stage 5: Impact */}
+          <div className={`pipeline-step ${isRcaComplete ? "current" : ""}`}>
             <div className="step-number">5</div>
             <strong>Impact</strong>
-            <span>Pending</span>
+            <span>{isRcaComplete ? "Next Step" : "Pending"}</span>
           </div>
 
           <div className="connector"></div>
 
+          {/* Stage 6: 3 Fixes */}
           <div className="pipeline-step">
             <div className="step-number">6</div>
             <strong>3 Fixes</strong>
@@ -167,6 +315,7 @@ export default function InvestigationWorkspace({
 
           <div className="connector"></div>
 
+          {/* Stage 7: Approval */}
           <div className="pipeline-step">
             <div className="step-number">7</div>
             <strong>Approval</strong>
@@ -175,6 +324,7 @@ export default function InvestigationWorkspace({
 
           <div className="connector"></div>
 
+          {/* Stage 8: Sentinel */}
           <div className="pipeline-step">
             <div className="step-number">8</div>
             <strong>Sentinel</strong>
@@ -183,6 +333,7 @@ export default function InvestigationWorkspace({
 
           <div className="connector"></div>
 
+          {/* Stage 9: GitHub PR */}
           <div className="pipeline-step">
             <div className="step-number">9</div>
             <strong>GitHub PR</strong>
@@ -252,25 +403,61 @@ export default function InvestigationWorkspace({
         {/* Primary Action Button to Advance */}
         <div className="workspace-action-bar">
           <div className="action-description">
-            <strong>Ready for Evidence Collection</strong>
+            <strong>
+              {isEvidenceCollected
+                ? `Stage 2 Complete (${evidence.length} Artifacts Collected)`
+                : "Ready for Evidence Collection"}
+            </strong>
             <p>
-              Query historical Incident Memory in SQLite and fetch local GitHub
-              context to build the Evidence Graph.
+              {isEvidenceCollected
+                ? "Historical incident memory and GitHub repository context collected. Ready to construct Evidence Graph."
+                : "Query historical Incident Memory in SQLite and fetch safe local GitHub context."}
             </p>
           </div>
 
           <button
             className="investigate-button"
-            onClick={() => {
-              if (onStartEvidenceCollection) {
-                onStartEvidenceCollection(incident.id);
-              }
-            }}
+            onClick={handleCollectEvidence}
+            disabled={collectingEvidence || isEvidenceCollected}
           >
-            Collect Evidence →
+            {collectingEvidence
+              ? "Collecting Evidence..."
+              : isEvidenceCollected
+              ? `Evidence Collected ✓ (${evidence.length})`
+              : "Collect Evidence →"}
           </button>
         </div>
       </section>
+
+      {/* Render Evidence Collector Artifacts View */}
+      <EvidenceCollectorView
+        evidence={evidence}
+        loading={collectingEvidence}
+        error={evidenceError}
+        onRetry={handleCollectEvidence}
+      />
+
+      {/* Render Evidence Graph View — only once evidence is collected */}
+      {isEvidenceCollected && (
+        <EvidenceGraphView
+          graphData={graphData}
+          loading={buildingGraph}
+          error={graphError}
+          onBuild={handleBuildGraph}
+          onRebuild={handleBuildGraph}
+        />
+      )}
+
+      {/* Render RCA / Cross-Examination View — only once graph is built */}
+      <RCAAnalysisView
+        rcaData={rcaData}
+        loading={false}
+        analyzing={analyzingRca}
+        error={rcaError}
+        graphBuilt={isGraphBuilt}
+        onRunRca={handleAnalyzeRca}
+        onRetry={handleAnalyzeRca}
+      />
     </div>
   );
 }
